@@ -1,0 +1,399 @@
+/**
+ * Client-side redaction of Claude Code transcripts, applied before anything is written to the
+ * upload preview. Several patterns are adapted from gitleaks (MIT, github.com/gitleaks/gitleaks).
+ *
+ * Every pattern must stay linear on multi-megabyte tool output: quantifiers are bounded and no
+ * unbounded run precedes a literal the engine would have to backtrack to.
+ */
+
+import { encodeProjectDir } from "./collect.js";
+
+export type Counts = Record<string, number>;
+
+interface Rule {
+  id: string;
+  re: RegExp;
+  /** Receives the match and its groups; returns the replacement. */
+  to: (g: string[]) => string;
+}
+
+const fixed = (s: string) => () => s;
+const keep1 = (s: string) => (g: string[]) => `${g[1] ?? ""}${s}`;
+
+const RULES: Rule[] = [
+  {
+    // A key cut off by `head` or a Read limit has no END line; redact to the end of the text.
+    id: "private-key",
+    re: /-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?-----END[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----|[\s\S]*$)/g,
+    to: fixed("<PRIVATE_KEY>"),
+  },
+  {
+    id: "anthropic-key",
+    re: /\bsk-ant-[A-Za-z0-9_-]{20,300}/g,
+    to: fixed("<ANTHROPIC_KEY>"),
+  },
+  {
+    id: "openai-key",
+    re: /\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,300}/g,
+    to: fixed("<OPENAI_KEY>"),
+  },
+  {
+    id: "github-token",
+    re: /\b(?:gh[pousr]_[A-Za-z0-9]{20,255}|github_pat_[A-Za-z0-9_]{22,255})/g,
+    to: fixed("<GITHUB_TOKEN>"),
+  },
+  {
+    id: "gitlab-token",
+    re: /\bglpat-[\w-]{20,64}/g,
+    to: fixed("<GITLAB_TOKEN>"),
+  },
+  {
+    id: "aws-access-key",
+    re: /\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b/g,
+    to: fixed("<AWS_ACCESS_KEY>"),
+  },
+  {
+    id: "aws-secret-key",
+    re: /(\baws[\w.-]{0,20}(?:secret|sk)[\w.-]{0,20}["'\s:=]{1,5})[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+=])/gi,
+    to: keep1("<AWS_SECRET>"),
+  },
+  {
+    id: "slack-token",
+    re: /\bxox[abeoprs]-[A-Za-z0-9-]{10,255}/g,
+    to: fixed("<SLACK_TOKEN>"),
+  },
+  {
+    id: "slack-webhook",
+    re: /https:\/\/hooks\.slack\.com\/(?:services|workflows)\/[\w/+-]{20,200}/g,
+    to: fixed("<SLACK_WEBHOOK>"),
+  },
+  {
+    id: "stripe-key",
+    re: /\b(?:sk|rk)_(?:test|live|prod)_[A-Za-z0-9]{10,99}\b/g,
+    to: fixed("<STRIPE_KEY>"),
+  },
+  {
+    id: "google-api-key",
+    re: /\bAIza[A-Za-z0-9_-]{35}/g,
+    to: fixed("<GOOGLE_API_KEY>"),
+  },
+  {
+    id: "google-oauth",
+    re: /\b(?:ya29\.[\w-]{20,2048}|GOCSPX-[\w-]{28})/g,
+    to: fixed("<GOOGLE_OAUTH>"),
+  },
+  { id: "npm-token", re: /\bnpm_[A-Za-z0-9]{36}\b/g, to: fixed("<NPM_TOKEN>") },
+  {
+    id: "pypi-token",
+    re: /\bpypi-AgEIcHlwaS5vcmc[\w-]{50,300}/g,
+    to: fixed("<PYPI_TOKEN>"),
+  },
+  {
+    id: "huggingface-token",
+    re: /\bhf_[A-Za-z]{34,64}\b/g,
+    to: fixed("<HF_TOKEN>"),
+  },
+  {
+    id: "sendgrid-key",
+    re: /\bSG\.[\w-]{22}\.[\w-]{43}\b/g,
+    to: fixed("<SENDGRID_KEY>"),
+  },
+  {
+    id: "databricks-token",
+    re: /\bdapi[a-f0-9]{32}(?:-\d)?\b/g,
+    to: fixed("<DATABRICKS_TOKEN>"),
+  },
+  { id: "twilio-key", re: /\bSK[0-9a-fA-F]{32}\b/g, to: fixed("<TWILIO_KEY>") },
+  {
+    id: "azure-client-secret",
+    re: /\b[A-Za-z0-9_~.]{3}\dQ~[A-Za-z0-9_~.-]{31,34}\b/g,
+    to: fixed("<AZURE_SECRET>"),
+  },
+  {
+    id: "azure-sas",
+    re: /([?&]sig=)[^&\s"']{1,512}/g,
+    to: keep1("<SIGNATURE>"),
+  },
+  {
+    id: "jwt",
+    re: /\beyJ[A-Za-z0-9_-]{10,4096}\.[A-Za-z0-9_-]{10,4096}\.[A-Za-z0-9_-]{10,4096}/g,
+    to: fixed("<JWT>"),
+  },
+  {
+    id: "auth-header",
+    re: /\b((?:Proxy-)?Authorization\s{0,5}:\s{0,5}(?:[A-Za-z-]{1,20}\s{1,5})?)[^\s"'<]{8,4096}/gi,
+    to: keep1("<TOKEN>"),
+  },
+  {
+    id: "cookie-header",
+    re: /\b((?:Set-)?Cookie\s{0,5}:\s{0,5})[^\r\n"'<]{1,4096}/gi,
+    to: keep1("<COOKIE>"),
+  },
+  {
+    id: "bearer-token",
+    re: /\b([Bb]earer\s{1,5})[A-Za-z0-9._~+/-]{20,4096}=*/g,
+    to: keep1("<TOKEN>"),
+  },
+  {
+    id: "url-credentials",
+    re: /(?<![a-z0-9+.-])([a-z][a-z0-9+.-]{0,30}:\/\/)[^\s/:@'"]{0,256}:[^\s'"]{0,512}@/gi,
+    to: keep1("<CREDENTIALS>@"),
+  },
+  {
+    id: "cli-password",
+    re: /(\s--?(?:password|passwd|pass|token|api-key|secret)(?:\s{1,5}|=))(?!-|<)[^\s"']{1,512}/gi,
+    to: keep1("<REDACTED>"),
+  },
+  {
+    id: "cli-password",
+    re: /(\b(?:mysql|mysqldump|mysqladmin|mariadb)\b[^\n]{0,200}?\s-p)(?![\s<])[^\s"']{1,512}/g,
+    to: keep1("<REDACTED>"),
+  },
+  {
+    id: "cli-password",
+    re: /(\s(?:-u|--user)\s{1,5}[^\s:'"]{1,128}:)(?!<)[^\s'"]{1,512}/g,
+    to: keep1("<REDACTED>"),
+  },
+  {
+    // `name = value` where the name says it holds a secret. Code that merely mentions such a
+    // name (`token: string`, `getToken(req)`, `${TOKEN}`, `process.env.X`) is left alone.
+    id: "secret-assignment",
+    re: /(?<![\w.-])((?:\\?")?[\w.-]{0,40}?(?:password|passwd|passphrase|secret|api[_-]?key|access[_-]?key|account[_-]?key|credentials?|token)(?:\\?")?)(\s{0,5}[=:]\s{0,5})(?!["']?<|[A-Za-z_$][\w$.]{0,100}\s{0,5}[(;]|(?:string|number|boolean|undefined|null|true|false)\b|\$\{|process\.env|os\.environ)(?:\\"[^"\\\n]{1,512}\\"|"[^"\n]{1,512}"|'[^'\n]{1,512}'|[^\s"',;}<)\\]{4,512})/gi,
+    to: (g) => `${g[1] ?? ""}${g[2] ?? ""}<REDACTED>`,
+  },
+];
+
+/** A `.env`-style line, also as printed by the Read tool with a `  12→` line-number prefix. */
+const ENV_LINE =
+  /^(\s{0,20}(?:\d{1,9}[→\t]\s{0,5})?(?:export\s{1,5})?[A-Z][A-Z0-9_]{0,100}\s{0,5}=\s{0,5})(\S.*)$/;
+const ENV_COMMENT = /^\s{0,20}(?:\d{1,9}[→\t]\s{0,5})?#/;
+const ENV_PATH = /(?:^|[/\\])(?:\.env(?:\.[\w.-]{1,40})?|\.envrc)$/;
+const BASE64_BLOB = /^[A-Za-z0-9+/\r\n]{1000,}={0,2}$/;
+const DATA_URI =
+  /(data:[\w.+-]{1,64}\/[\w.+-]{1,64};base64,)[A-Za-z0-9+/=]{100,}/g;
+const LONG_BASE64 = /(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{2000,}={0,2}/g;
+/** JSON keys whose values are secrets whatever they look like. */
+const SECRET_KEY =
+  /(?:password|passwd|passphrase|secret|api[_-]?key|access[_-]?key|account[_-]?key|private[_-]?key|credentials?|token|cookie|authorization)$/i;
+
+const bump = (counts: Counts, id: string, n = 1) => {
+  if (n) counts[id] = (counts[id] ?? 0) + n;
+};
+
+function replaceCounting(
+  s: string,
+  re: RegExp,
+  to: (g: string[]) => string,
+  counts: Counts,
+  id: string,
+): string {
+  let hits = 0;
+  const out = s.replace(re, (...args: unknown[]) => {
+    hits++;
+    // Arguments are (match, ...groups, offset, input); the offset is the first number.
+    const groups = args.slice(
+      0,
+      args.findIndex((a) => typeof a === "number"),
+    );
+    return to(groups.map((g) => (typeof g === "string" ? g : "")));
+  });
+  bump(counts, id, hits);
+  return out;
+}
+
+/** Masks every value of a `.env` body, keeping the names so the analysis can still read them. */
+function maskEnvBody(text: string, counts: Counts): string {
+  const lines = text.split("\n");
+  if (!lines.some((l) => ENV_LINE.test(l))) return text;
+  bump(counts, "env-file");
+  return lines
+    .map((l) => (ENV_COMMENT.test(l) ? l : l.replace(ENV_LINE, "$1<REDACTED>")))
+    .join("\n");
+}
+
+export function scrubText(
+  text: string,
+  counts: Counts,
+  home?: string,
+  envFile = false,
+): string {
+  if (BASE64_BLOB.test(text)) {
+    bump(counts, "base64-blob");
+    return "<base64 omitted>";
+  }
+  let s = envFile ? maskEnvBody(text, counts) : text;
+  s = replaceCounting(
+    s,
+    DATA_URI,
+    keep1("<base64 omitted>"),
+    counts,
+    "base64-blob",
+  );
+  s = replaceCounting(
+    s,
+    LONG_BASE64,
+    fixed("<base64 omitted>"),
+    counts,
+    "base64-blob",
+  );
+  for (const rule of RULES)
+    s = replaceCounting(s, rule.re, rule.to, counts, rule.id);
+  return home ? rewriteHome(s, home, counts) : s;
+}
+
+function normalHome(home: string | undefined): string | undefined {
+  const h = home?.replace(/[/\\]+$/, "");
+  return h && h.length >= 2 ? h : undefined;
+}
+
+/**
+ * The home path becomes `~`, and so does the form Claude Code uses in project folder names
+ * (`-Users-pat-repo` becomes `~-repo`), so memory paths still match the uploaded folders.
+ */
+function rewriteHome(text: string, home: string, counts: Counts): string {
+  const h = normalHome(home);
+  if (!h) return text;
+  let s = text;
+  const forms: [string, string][] = [
+    [h, "(?![A-Za-z0-9_-])"],
+    [encodeProjectDir(h), "(?![A-Za-z0-9])"],
+  ];
+  for (const [form, boundary] of forms) {
+    if (s.includes(form))
+      s = replaceCounting(
+        s,
+        new RegExp(`${escapeRe(form)}${boundary}`, "g"),
+        fixed("~"),
+        counts,
+        "home-path",
+      );
+  }
+  return s;
+}
+
+/** The upload folder name for a project: the user's home part replaced with `~`. */
+export function aliasProjectDir(project: string, home?: string): string {
+  const h = normalHome(home);
+  if (!h) return project;
+  const enc = encodeProjectDir(h);
+  return project === enc || project.startsWith(`${enc}-`)
+    ? `~${project.slice(enc.length)}`
+    : project;
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isImageBlock(v: Record<string, unknown>): boolean {
+  const src = v.source as Record<string, unknown> | undefined;
+  return (
+    v.type === "image" &&
+    typeof src === "object" &&
+    src !== null &&
+    typeof src.data === "string"
+  );
+}
+
+function namesEnvFile(obj: Record<string, unknown> | undefined): boolean {
+  if (!obj || typeof obj !== "object") return false;
+  return [obj.filePath, obj.file_path].some(
+    (p) => typeof p === "string" && ENV_PATH.test(p),
+  );
+}
+
+/** True when this object, or the tool result it carries, is about a `.env` file. */
+function aboutEnvFile(obj: Record<string, unknown>): boolean {
+  const result = obj.toolUseResult as Record<string, unknown> | undefined;
+  return (
+    namesEnvFile(obj) ||
+    namesEnvFile(result) ||
+    namesEnvFile(result?.file as Record<string, unknown> | undefined)
+  );
+}
+
+export function redactValue(
+  value: unknown,
+  counts: Counts,
+  home?: string,
+  envFile = false,
+): unknown {
+  if (typeof value === "string") return scrubText(value, counts, home, envFile);
+  if (Array.isArray(value))
+    return value.map((v) => redactValue(v, counts, home, envFile));
+  if (typeof value !== "object" || value === null) return value;
+  const obj = value as Record<string, unknown>;
+  if (isImageBlock(obj)) {
+    bump(counts, "image");
+    const source = obj.source as Record<string, unknown>;
+    return { ...obj, source: { ...source, data: "<image omitted>" } };
+  }
+  const env = envFile || aboutEnvFile(obj);
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    const key = scrubText(k, counts, home);
+    if (k === "originalFile" && typeof v === "string") {
+      bump(counts, "original-file");
+      out[key] = "<file omitted>";
+    } else if (
+      SECRET_KEY.test(k) &&
+      (typeof v === "string" || typeof v === "number") &&
+      !String(v).startsWith("<")
+    ) {
+      bump(counts, "secret-key");
+      out[key] = "<REDACTED>";
+    } else {
+      out[key] = redactValue(v, counts, home, env);
+    }
+  }
+  return out;
+}
+
+/**
+ * Redacts one JSONL line. Returns undefined for a line that is not JSON (a torn line at the end
+ * of a live session): it is dropped rather than uploaded unscrubbed.
+ */
+export function redactLine(
+  line: string,
+  counts: Counts,
+  home?: string,
+): string | undefined {
+  if (!line.trim()) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    bump(counts, "unparsable-line");
+    return undefined;
+  }
+  return JSON.stringify(redactValue(parsed, counts, home));
+}
+
+export function redactJsonl(
+  text: string,
+  counts: Counts,
+  home?: string,
+): string {
+  const out: string[] = [];
+  for (const line of text.split("\n")) {
+    const r = redactLine(line, counts, home);
+    if (r !== undefined) out.push(r);
+  }
+  return out.length ? `${out.join("\n")}\n` : "";
+}
+
+/** For `*.meta.json` and other single-document JSON files in a session folder. */
+export function redactJson(
+  text: string,
+  counts: Counts,
+  home?: string,
+): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    bump(counts, "unparsable-file");
+    return "{}";
+  }
+  return JSON.stringify(redactValue(parsed, counts, home));
+}
