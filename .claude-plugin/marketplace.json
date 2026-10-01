@@ -1,0 +1,15 @@
+{
+  "name": "revefi",
+  "description": "Revefi plugins for Claude Code",
+  "owner": {
+    "name": "Revefi",
+    "url": "https://www.revefi.com"
+  },
+  "plugins": [
+    {
+      "name": "revefi",
+      "source": "./integrations/claude-code",
+      "description": "Find repeated work and wasted spend in your Claude Code sessions, with concrete fixes"
+    }
+  ]
+}
