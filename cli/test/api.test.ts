@@ -6,43 +6,16 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { ApiError, Client, loadMachineId, type RunStatus } from "../src/api.js";
 import type { Manifest } from "../src/pack.js";
+import { fakeFetch, type Handler, json, type Seen } from "./fake-server.js";
 
-interface Seen {
-  method: string;
-  url: string;
-  headers: Record<string, string>;
-  body?: string | Uint8Array;
-}
-
-type Handler = (req: Seen) => Response | Promise<Response>;
-
-const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
-  new Response(body === undefined ? null : JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json", ...headers },
-  });
-
-function fakeServer(routes: Record<string, Handler[] | Handler>) {
-  const seen: Seen[] = [];
+function fakeServer(routes: Parameters<typeof fakeFetch>[0]) {
+  const { fetch: fetchImpl, seen } = fakeFetch(routes);
   const sleeps: number[] = [];
-  const fetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
-    const url = String(input);
-    const method = init?.method ?? "GET";
-    const body = init?.body instanceof Blob ? new Uint8Array(await init.body.arrayBuffer()) : (init?.body as string | undefined);
-    const req: Seen = { method, url, headers: { ...(init?.headers as Record<string, string>) }, body };
-    seen.push(req);
-    const key = `${method} ${new URL(url).pathname}`;
-    const route = routes[key];
-    if (!route) throw new TypeError(`no route for ${key}`);
-    const handler = Array.isArray(route) ? (route.length > 1 ? route.shift() : route[0]) : route;
-    if (!handler) throw new TypeError(`no handler left for ${key}`);
-    return handler(req);
-  };
   const client = new Client({
     base: "https://api.test/",
     machineId: "m".repeat(64),
     userAgent: "revefi-agent-analyzer/test",
-    fetch: fetchImpl as typeof fetch,
+    fetch: fetchImpl,
     sleep: async (ms) => {
       sleeps.push(ms);
     },
