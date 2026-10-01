@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://revefi.com/agent-analyzer/upload_manifest.schema.json",
+  "title": "Agent Analyzer upload manifest, format v1",
+  "description": "Sent by the plugin CLI with POST /api/runs, before the upload. Describes the one gzipped tar that follows (projects/<project>/<session>.jsonl plus <session>/subagents/). A new field or meaning is a new format_version.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format_version", "tool", "client", "window", "session_count", "bytes"],
+  "properties": {
+    "format_version": {
+      "description": "Manifest and upload layout version.",
+      "const": 1
+    },
+    "tool": {
+      "description": "The agentic tool whose history is uploaded; selects the server-side reader.",
+      "enum": ["claude-code"]
+    },
+    "client": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {
+          "description": "The uploading client.",
+          "enum": ["cli", "plugin"]
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "window": {
+      "description": "The history window the client collected, in the client's local dates.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["days", "start", "end"],
+      "properties": {
+        "days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 90
+        },
+        "start": {
+          "type": "string",
+          "format": "date"
+        },
+        "end": {
+          "type": "string",
+          "format": "date"
+        }
+      }
+    },
+    "session_count": {
+      "description": "Sessions in the upload, subagent transcripts not counted separately.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "bytes": {
+      "description": "Contract ceilings; the server may enforce lower limits (see server/README.md).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["compressed", "uncompressed"],
+      "properties": {
+        "compressed": {
+          "description": "Exact size of the .tar.gz the client will PUT.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483648
+        },
+        "uncompressed": {
+          "description": "Total size of the files inside the tar.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 21474836480
+        }
+      }
+    }
+  }
+}

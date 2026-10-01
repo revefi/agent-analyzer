@@ -1,0 +1,6 @@
+node_modules/
+dist/
+coverage/
+.revefi/
+*.tgz
+.DS_Store
