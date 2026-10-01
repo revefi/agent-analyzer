@@ -1,1 +1,141 @@
-# agent-analyzer
+# Revefi Agent Analyzer
+
+Find the work your coding agent keeps repeating, what it costs, and how to stop paying for it.
+
+`revefi-agent-analyzer` reads your recent Claude Code sessions, redacts them on your machine, and
+(only after you say yes) sends them to Revefi for analysis. You get a report link with the
+repeated tasks ranked by spend, and concrete fixes for each: a skill, a script, a hook, or a
+`CLAUDE.md` rule. Inside Claude Code, the plugin can make those fixes in your repository, asking
+you before each one.
+
+## Install
+
+### Claude Code plugin
+
+```text
+/plugin marketplace add revefi/agent-analyzer
+/plugin install revefi@revefi
+```
+
+Then, in any repository, run `/revefi:analyze`. You can say what to include, for example
+`/revefi:analyze last 3 days` or `/revefi:analyze all projects`.
+
+The plugin runs the CLI with your installed Node.js, version 22.12 or newer. Plugins that ship
+executables are not installed by claude.ai or Cowork; use Claude Code in a terminal or an IDE.
+
+### Command line
+
+With Node.js 22.12 or newer:
+
+```bash
+npm install -g revefi-agent-analyzer
+```
+
+Or a standalone binary for macOS or Linux, with no Node needed:
+
+```bash
+curl -fsSL https://github.com/revefi/agent-analyzer/releases/latest/download/install.sh | sh
+```
+
+The installer checks the binary against the release's `SHA256SUMS`, verifies its GitHub build
+attestation when the `gh` CLI is installed (set `REVEFI_VERIFY=1` to require that), and installs
+it to `~/.local/bin`. Windows binaries are on the
+[releases page](https://github.com/revefi/agent-analyzer/releases).
+
+The binaries are not yet signed by Revefi. Installed with the command above they run normally;
+downloaded with a browser, macOS Gatekeeper and Windows SmartScreen will warn before the first
+run. To check a download yourself:
+`gh attestation verify <file> --repo revefi/agent-analyzer`.
+
+Then, from a repository you work on with Claude Code:
+
+```bash
+revefi-agent-analyzer analyze
+```
+
+## What leaves your machine
+
+Nothing is sent until you confirm. First, the CLI writes a preview: the exact files it would
+upload, already redacted, in `.revefi/upload-preview/<timestamp>/` inside your repository, with a
+`REDACTION_REPORT.md` that lists every session and everything that was removed. The `.revefi/`
+folder ignores itself in git.
+
+**What is sent:** the transcripts of the Claude Code sessions that started in the window you
+chose (7 days by default), for this repository only unless you pass `--all-projects`. That
+includes your prompts, Claude's replies, the commands it ran with their output, and code and
+file contents that appeared in those sessions. Subagent transcripts of those sessions are
+included. A small summary goes with them: the dates, the session count, the sizes, and the
+CLI's name and version.
+
+**What is removed first:**
+
+- secrets in known formats: API keys and tokens (Anthropic, OpenAI, GitHub, GitLab, AWS, Google,
+  Slack, Stripe, npm, PyPI, Hugging Face, SendGrid, Databricks, Twilio, Azure), private keys,
+  JWTs, authorization and cookie headers, passwords in URLs and on command lines, and values
+  under names like `password`, `secret`, `token` or `api_key`;
+- every value in `.env` files Claude read or wrote;
+- images and long base64 data;
+- the full copies of files Claude Code keeps from before each edit;
+- your home folder path, which becomes `~` (also in project folder names).
+
+**What is never sent:** tool output Claude Code saves outside the transcripts (`tool-results/`),
+sessions outside the window or the chosen scope, and anything else on your machine.
+
+Redaction recognises known formats; it cannot catch every kind of sensitive text. Read the
+preview if a session touched something you would not share, and leave sessions out with
+`--exclude-session <id>`.
+
+To remove everything you have uploaded from this machine, at any time:
+
+```bash
+revefi-agent-analyzer delete-my-data
+```
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `analyze` | Prepare a preview, ask once, upload, wait, and print the report link and top tasks |
+| `prepare` | Write the redacted preview only; uploads nothing |
+| `upload <preview>` | Upload a prepared preview, then wait for the report |
+| `status <run>` | Show a run's progress; `--wait` follows it to the end |
+| `recommendations <run>` | Print the recommendations of a finished run |
+| `feedback <run> <rec> up\|down` | Rate a recommendation |
+| `share <run> private\|link` | Make a report private, or readable by anyone with its link |
+| `delete-my-data` | Delete every run, upload and report made from this machine |
+
+Common options: `--days N` (1 to 7), `--all-projects`, `--exclude-session ID`, `--yes` (don't
+ask), `--json`. Run `revefi-agent-analyzer --help` for all of them.
+
+### This machine's id
+
+There is no account to sign in to yet. The first upload creates a random id for this machine in
+`~/.config/revefi/agent-analyzer/machine-id` (owner-only). It is what lets you check, share and
+delete your runs, so keep it: if you delete that file you lose access to the runs made so far.
+Run `delete-my-data` first if you want them gone.
+
+### Scripting
+
+With `--json`, commands print one JSON object on stdout; progress and messages go to stderr, and
+failures print `{"error": {"kind": ..., "message": ...}}`. Exit codes: `0` done, `1` failed or
+refused, `2` bad usage, `3` the analysis is still running (check again with `status --wait`).
+
+## Development
+
+```bash
+pnpm install
+pnpm test
+pnpm build    # writes dist/ and the plugin's bundled copy in integrations/claude-code/lib/
+```
+
+The plugin is installed straight from this repository, so its bundle is committed; CI fails if
+it differs from a fresh build. To release, bump `version` in both `package.json` and
+`integrations/claude-code/.claude-plugin/plugin.json`, merge, and push a `vX.Y.Z` tag on `main`.
+The release workflow tests every binary on its own platform, attests the build, and publishes
+to npm through trusted publishing; the `release` environment must approve it. Claude Code
+updates installed plugins when that version changes.
+
+## Security and license
+
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md). Licensed under the
+[Apache License 2.0](LICENSE).

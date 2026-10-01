@@ -37,6 +37,8 @@ jobs:
           git status --porcelain -- integrations/claude-code
           test -z "$(git status --porcelain -- integrations/claude-code)"
       - run: integrations/claude-code/bin/revefi-agent-analyzer --version
+      - name: Markdown lint
+        run: pnpm dlx markdownlint-cli2@0.23.3 "**/*.md" "#node_modules"
 
   secrets:
     runs-on: ubuntu-latest
