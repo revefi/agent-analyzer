@@ -32,7 +32,11 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
-      - run: node dist/revefi-agent-analyzer.js --version
+      - name: Committed plugin bundle matches the source
+        run: |
+          git status --porcelain -- integrations/claude-code
+          test -z "$(git status --porcelain -- integrations/claude-code)"
+      - run: integrations/claude-code/bin/revefi-agent-analyzer --version
 
   secrets:
     runs-on: ubuntu-latest
