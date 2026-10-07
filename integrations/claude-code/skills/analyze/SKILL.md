@@ -3,7 +3,7 @@ name: analyze
 description: Analyze this repository's recent Claude Code sessions with Revefi to find repeated work and wasted spend, then propose concrete fixes (skills, scripts, hooks, CLAUDE.md rules) and, if the user agrees, make them.
 argument-hint: "[all projects] [last N days] [skip session ID]"
 disable-model-invocation: true
-allowed-tools: Bash(revefi-agent-analyzer prepare *) Bash(revefi-agent-analyzer status *) Bash(revefi-agent-analyzer recommendations *)
+allowed-tools: Bash(revefi-agent-analyzer whoami *) Bash(revefi-agent-analyzer login *) Bash(revefi-agent-analyzer prepare *) Bash(revefi-agent-analyzer status *) Bash(revefi-agent-analyzer recommendations *)
 ---
 
 # Analyze Claude Code sessions with Revefi
@@ -24,8 +24,37 @@ Rules that hold throughout:
 - Single-quote every path, id and URL you put in a command.
 - Don't read the preview files into the conversation. They are large and may hold sensitive
   text. The user can open them; you report the summary.
-- With `--json`, the CLI prints one JSON object on stdout. If it has an `error` key, show
-  `error.message` to the user as written (it says what to do next) and stop.
+- With `--json`, the CLI prints one JSON object on stdout. If it has an `error` key whose `kind`
+  is `sign_in` (not signed in, or the sign-in expired), sign the user in (step 0) and run the
+  command again, once. For any other error, show `error.message` to the user as written (it says
+  what to do next) and stop. Step 0 handles its own errors as it describes.
+
+## 0. Sign in
+
+```bash
+revefi-agent-analyzer whoami --json
+```
+
+If the JSON has no `error`, carry on. If the error kind is `sign_in`, start a sign-in:
+
+```bash
+revefi-agent-analyzer login --start --json
+```
+
+Show the user `verification_uri_complete` and `user_code`, and tell them to open the link,
+check that it shows the same code, and continue with Google. Someone signing in for the first
+time gets an account then; there is no separate sign-up. Then wait, with a Bash timeout of
+600000 ms:
+
+```bash
+revefi-agent-analyzer login --wait --json --timeout 420
+```
+
+It prints the `email` once they approve. If the error kind is `sign_in_pending`, they haven't
+approved yet: run the same command once more. Never run `login --start` again while waiting; a
+new code would replace the one they are approving. If it is still pending after that, or fails
+any other way, show `error.message` and tell the user to run `revefi-agent-analyzer login` in a
+terminal, then stop.
 
 ## 1. Prepare the preview
 
