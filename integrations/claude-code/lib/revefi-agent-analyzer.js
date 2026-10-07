@@ -8,6 +8,18 @@ import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+
+// cli/src/net.ts
+function unreachable(err, host, env) {
+  const e = err;
+  if (e.name === "TimeoutError") return `${host} didn't respond in time. Try again in a few minutes.`;
+  const why = e.cause?.code ?? e.cause?.message ?? e.message;
+  const proxied = (env.HTTPS_PROXY || env.https_proxy) && !env.NODE_USE_ENV_PROXY;
+  const hint = proxied ? " You have HTTPS_PROXY set; Node uses it only when NODE_USE_ENV_PROXY=1 is also set." : "";
+  return `Couldn't reach ${host} (${why}). Check your connection and try again.${hint}`;
+}
+
+// cli/src/api.ts
 var DEFAULT_API = "https://analyzer.revefi.com";
 var ISSUES_URL = "https://github.com/revefi/agent-analyzer/issues";
 var FINAL_PHASES = ["done", "failed", "deferred"];
@@ -70,14 +82,7 @@ var Client = class {
     try {
       return await this.fetch(url, init);
     } catch (err) {
-      const e = err;
-      if (e.name === "TimeoutError") {
-        throw new ApiError(`${host} didn't respond in time. Try again in a few minutes.`);
-      }
-      const why = e.cause?.code ?? e.cause?.message ?? e.message;
-      const proxied = (this.env.HTTPS_PROXY || this.env.https_proxy) && !this.env.NODE_USE_ENV_PROXY;
-      const hint = proxied ? " You have HTTPS_PROXY set; Node uses it only when NODE_USE_ENV_PROXY=1 is also set." : "";
-      throw new ApiError(`Couldn't reach ${host} (${why}). Check your connection and try again.${hint}`);
+      throw new ApiError(unreachable(err, host, this.env));
     }
   }
   async deviceToken() {
@@ -238,23 +243,357 @@ function explain(res, detail, c) {
   }
 }
 
+// cli/src/auth.ts
+import { link, mkdir as mkdir2, open, readFile as readFile2, rename, rm, stat, writeFile as writeFile2 } from "node:fs/promises";
+import { join as join2 } from "node:path";
+var SignInError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "SignInError";
+  }
+};
+var CREDENTIALS = "credentials.json";
+var ACCESS = "access-token.json";
+var LOCK = "renew.lock";
+var MAX_POLL_INTERVAL_S = 30;
+var HOST = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i;
+var PENDING = "pending-login.json";
+var TIMEOUT_MS = 3e4;
+var STALE_LOCK_MS = 3 * TIMEOUT_MS;
+var EXPIRY_MARGIN_MS = 6e4;
+var REFUSALS = /* @__PURE__ */ new Map([
+  ["unapproved_authentication_method", "Your organization requires its own sign-in, which the analyzer doesn't support yet."],
+  ["unapproved_audience", "This sign-in can't be used for the analyzer."]
+]);
+function emailFrom(idToken) {
+  const payload = idToken?.split(".")[1];
+  if (!payload) return null;
+  try {
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return typeof claims.email === "string" ? claims.email : null;
+  } catch {
+    return null;
+  }
+}
+function sameOrigin(a, b2) {
+  try {
+    return new URL(a).origin === new URL(b2).origin;
+  } catch {
+    return false;
+  }
+}
+function isSignInPage(link2, domain) {
+  try {
+    const url = new URL(link2);
+    return url.protocol === "https:" && url.host === domain && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+async function writePrivate(file, value) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  await writeFile2(tmp, `${JSON.stringify(value, null, 2)}
+`, { mode: 384 });
+  await rename(tmp, file);
+}
+var isMissing = (err) => err.code === "ENOENT";
+async function breakStaleLock(lock, staleMtime) {
+  const moved = `${lock}.${process.pid}.stale`;
+  try {
+    await rename(lock, moved);
+  } catch (err) {
+    if (isMissing(err)) return;
+    throw err;
+  }
+  try {
+    if ((await stat(moved)).mtimeMs !== staleMtime) await link(moved, lock);
+  } catch (err) {
+    if (err.code !== "EEXIST") throw err;
+  } finally {
+    await rm(moved, { force: true });
+  }
+}
+var Auth = class {
+  constructor(opts) {
+    this.opts = opts;
+    this.base = opts.base.replace(/\/+$/, "");
+    this.fetch = opts.fetch ?? globalThis.fetch;
+    this.sleep = opts.sleep ?? ((ms2) => new Promise((r) => setTimeout(r, ms2)));
+    this.now = opts.now ?? Date.now;
+  }
+  opts;
+  base;
+  fetch;
+  sleep;
+  now;
+  access;
+  file(name) {
+    return join2(this.opts.dir, name);
+  }
+  get login() {
+    return this.opts.loginCommand ?? "revefi-agent-analyzer login";
+  }
+  async readJson(name) {
+    const file = this.file(name);
+    try {
+      return JSON.parse(await readFile2(file, "utf8"));
+    } catch (err) {
+      if (isMissing(err)) return null;
+      throw new SignInError(`${file} is damaged. Delete it and run \`${this.login}\` again.`);
+    }
+  }
+  notSignedIn() {
+    return new SignInError(`You're not signed in to ${new URL(this.base).host}. Run \`${this.login}\` first.`);
+  }
+  /** Runs fn while holding this server's renewal lock, so two processes never renew at once. */
+  async withLock(fn) {
+    const lock = this.file(LOCK);
+    for (; ; ) {
+      try {
+        const handle = await open(lock, "wx", 384);
+        await handle.close();
+        break;
+      } catch (err) {
+        if (err.code !== "EEXIST") throw err;
+      }
+      let mtime = 0;
+      try {
+        mtime = (await stat(lock)).mtimeMs;
+      } catch (err) {
+        if (!isMissing(err)) throw err;
+        continue;
+      }
+      if (Date.now() - mtime > STALE_LOCK_MS) await breakStaleLock(lock, mtime);
+      else await this.sleep(200);
+    }
+    try {
+      return await fn();
+    } finally {
+      await rm(lock, { force: true });
+    }
+  }
+  async saveAccess(token, expiresIn) {
+    const cached = { token, expires_at: this.now() + (expiresIn ?? 0) * 1e3 };
+    this.access = { token, expiresAt: cached.expires_at };
+    await writePrivate(this.file(ACCESS), cached);
+    return token;
+  }
+  async cachedAccess(rejected) {
+    let cached = null;
+    try {
+      cached = await this.readJson(ACCESS);
+    } catch (err) {
+      if (!(err instanceof SignInError)) throw err;
+    }
+    if (!cached || cached.token === rejected || cached.expires_at - EXPIRY_MARGIN_MS <= this.now()) return null;
+    this.access = { token: cached.token, expiresAt: cached.expires_at };
+    return cached.token;
+  }
+  async post(url, form) {
+    let res;
+    try {
+      res = await this.fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+        body: new URLSearchParams(form).toString(),
+        signal: AbortSignal.timeout(TIMEOUT_MS)
+      });
+    } catch (err) {
+      throw new SignInError(unreachable(err, new URL(url).host, this.opts.env ?? process.env));
+    }
+    const text = await res.text();
+    try {
+      return { status: res.status, body: text ? JSON.parse(text) : {} };
+    } catch {
+      return { status: res.status, body: {} };
+    }
+  }
+  async config() {
+    let res;
+    try {
+      res = await this.fetch(`${this.base}/api/auth/config`, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    } catch (err) {
+      throw new SignInError(unreachable(err, new URL(this.base).host, this.opts.env ?? process.env));
+    }
+    if (res.status === 503) throw new SignInError(`${new URL(this.base).host} doesn't offer sign-in yet.`);
+    let body = null;
+    try {
+      body = await res.json();
+    } catch {
+      body = null;
+    }
+    if (!res.ok || !body?.domain || !HOST.test(body.domain) || !body.audience || !body.cli_client_id) {
+      throw new SignInError(`${new URL(this.base).host} returned an unexpected sign-in configuration. Try again later.`);
+    }
+    if (!sameOrigin(body.audience, this.base)) {
+      throw new SignInError(`${new URL(this.base).host} asked for a sign-in to a different server. Check --api and REVEFI_ANALYZER_API.`);
+    }
+    return { domain: body.domain, audience: body.audience, cli_client_id: body.cli_client_id };
+  }
+  /** Starts a device login and remembers it, so `finishLogin` can run in a later process. */
+  async startLogin() {
+    const config = await this.config();
+    const { status, body } = await this.post(`https://${config.domain}/oauth/device/code`, {
+      client_id: config.cli_client_id,
+      audience: config.audience,
+      scope: "openid email offline_access"
+    });
+    const code = body;
+    if (status !== 200 || !code.device_code || !code.user_code || !code.verification_uri_complete) {
+      throw new SignInError(`Couldn't start sign-in (${code.error_description ?? `HTTP ${status}`}). Try again.`);
+    }
+    if (!isSignInPage(code.verification_uri_complete, config.domain)) {
+      throw new SignInError(`${config.domain} returned an unexpected sign-in link. Try again later.`);
+    }
+    const pending = {
+      user_code: code.user_code,
+      verification_uri_complete: code.verification_uri_complete,
+      expires_at: this.now() + (code.expires_in ?? 900) * 1e3,
+      interval: code.interval ?? 5,
+      device_code: code.device_code,
+      config
+    };
+    await mkdir2(this.opts.dir, { recursive: true, mode: 448 });
+    await writePrivate(this.file(PENDING), pending);
+    return pending;
+  }
+  async expired() {
+    await rm(this.file(PENDING), { force: true });
+    return new SignInError(`The sign-in code expired. Run \`${this.login}\` again.`);
+  }
+  /** Waits for the user to approve the pending login, then stores the refresh token. */
+  async finishLogin(opts = {}) {
+    const pending = await this.readJson(PENDING);
+    if (!pending) throw new SignInError(`No sign-in is in progress. Run \`${this.login}\` to start one.`);
+    const waitUntil = this.now() + (opts.timeoutMs ?? Number.POSITIVE_INFINITY);
+    let interval = pending.interval;
+    for (; ; ) {
+      if (this.now() >= pending.expires_at) throw await this.expired();
+      let body = {};
+      try {
+        ({ body } = await this.post(`https://${pending.config.domain}/oauth/token`, {
+          grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+          device_code: pending.device_code,
+          client_id: pending.config.cli_client_id
+        }));
+      } catch {
+        body = {};
+      }
+      if (body.access_token) {
+        if (!body.refresh_token) {
+          await rm(this.file(PENDING), { force: true });
+          throw new SignInError(`${new URL(this.base).host} isn't set up for command-line sign-in yet. Report it to Revefi.`);
+        }
+        return { email: await this.signedIn(pending.config, body) };
+      }
+      if (body.error === "expired_token") throw await this.expired();
+      if (body.error === "access_denied" || body.error === "invalid_grant") {
+        await rm(this.file(PENDING), { force: true });
+        const why = REFUSALS.get(body.error_description ?? "") ?? "Sign-in was refused or cancelled.";
+        throw new SignInError(`${why} Run \`${this.login}\` to try again.`);
+      }
+      if (body.error !== "authorization_pending") interval = Math.min(interval + 5, MAX_POLL_INTERVAL_S);
+      const next = this.now() + interval * 1e3;
+      if (next >= pending.expires_at) throw await this.expired();
+      if (next > waitUntil) {
+        throw new SignInError(`Still waiting for you to approve the sign-in in your browser. Run \`${this.login} --wait\` once you have.`);
+      }
+      await this.sleep(interval * 1e3);
+    }
+  }
+  /** Stores a new sign-in, revoking the one it replaces. */
+  async signedIn(config, body) {
+    const previous = await this.readJson(CREDENTIALS);
+    const email = emailFrom(body.id_token);
+    await writePrivate(this.file(CREDENTIALS), {
+      domain: config.domain,
+      audience: config.audience,
+      client_id: config.cli_client_id,
+      refresh_token: body.refresh_token ?? "",
+      email
+    });
+    await rm(this.file(PENDING), { force: true });
+    await this.saveAccess(body.access_token ?? "", body.expires_in);
+    if (previous && previous.refresh_token !== body.refresh_token) await this.revoke(previous);
+    return email;
+  }
+  async email() {
+    const creds = await this.readJson(CREDENTIALS);
+    if (!creds) throw this.notSignedIn();
+    return creds.email;
+  }
+  /** A valid access token, renewed when needed; `force` means the current one was just rejected. */
+  async accessToken(force = false) {
+    const rejected = force ? this.access?.token : void 0;
+    if (!force && this.access && this.access.expiresAt - EXPIRY_MARGIN_MS > this.now()) return this.access.token;
+    const fromDisk = await this.cachedAccess(rejected);
+    if (fromDisk) return fromDisk;
+    if (!await this.readJson(CREDENTIALS)) throw this.notSignedIn();
+    await mkdir2(this.opts.dir, { recursive: true, mode: 448 });
+    return this.withLock(async () => {
+      const renewed = await this.cachedAccess(rejected);
+      if (renewed) return renewed;
+      const creds = await this.readJson(CREDENTIALS);
+      if (!creds) throw this.notSignedIn();
+      const { status, body } = await this.post(`https://${creds.domain}/oauth/token`, {
+        grant_type: "refresh_token",
+        client_id: creds.client_id,
+        refresh_token: creds.refresh_token
+      });
+      if (body.access_token) {
+        if (body.refresh_token) await writePrivate(this.file(CREDENTIALS), { ...creds, refresh_token: body.refresh_token });
+        return this.saveAccess(body.access_token, body.expires_in);
+      }
+      if (body.error === "invalid_grant") {
+        await rm(this.file(CREDENTIALS), { force: true });
+        await rm(this.file(ACCESS), { force: true });
+        throw new SignInError(`Your sign-in to ${new URL(this.base).host} has expired. Run \`${this.login}\` again.`);
+      }
+      if (status === 429) throw new SignInError("Sign-in is busy. Wait a minute and try again.");
+      throw new SignInError(`Couldn't renew your sign-in (HTTP ${status}). Try again in a few minutes.`);
+    });
+  }
+  async revoke(creds) {
+    try {
+      const { status } = await this.post(`https://${creds.domain}/oauth/revoke`, {
+        client_id: creds.client_id,
+        token: creds.refresh_token
+      });
+      return status === 200;
+    } catch {
+      return false;
+    }
+  }
+  /** Forgets the sign-in, revoking its refresh token at Auth0 when it can be reached. */
+  async logout() {
+    const creds = await this.readJson(CREDENTIALS);
+    await rm(this.file(PENDING), { force: true });
+    await rm(this.file(ACCESS), { force: true });
+    this.access = void 0;
+    if (!creds) return { signedIn: false, revoked: false };
+    const revoked = await this.revoke(creds);
+    await rm(this.file(CREDENTIALS), { force: true });
+    return { signedIn: true, revoked };
+  }
+};
+
 // cli/src/commands.ts
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, openAsBlob } from "node:fs";
-import { readFile as readFile3, rm as rm2, writeFile as writeFile3 } from "node:fs/promises";
+import { readFile as readFile4, rm as rm3, writeFile as writeFile4 } from "node:fs/promises";
 import { homedir as homedir3 } from "node:os";
-import { basename, dirname as dirname2, join as join5, relative as relative2, resolve } from "node:path";
+import { basename, dirname as dirname2, join as join6, relative as relative2, resolve } from "node:path";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { parseArgs } from "node:util";
 
 // cli/src/collect.ts
 import { createReadStream } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { readdir, stat as stat2 } from "node:fs/promises";
 import { homedir as homedir2 } from "node:os";
-import { join as join2, relative, sep } from "node:path";
+import { join as join3, relative, sep } from "node:path";
 import { createInterface } from "node:readline";
 function defaultProjectsDir(env = process.env) {
-  return join2(env.CLAUDE_CONFIG_DIR ?? join2(homedir2(), ".claude"), "projects");
+  return join3(env.CLAUDE_CONFIG_DIR ?? join3(homedir2(), ".claude"), "projects");
 }
 function encodeProjectDir(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
@@ -298,9 +637,9 @@ async function readHead(file, needCwd, window) {
 }
 var SUBAGENT_FILE = /^agent-.+\.(?:jsonl|meta\.json)$/;
 async function subagentFiles(sessionDir) {
-  const dir = join2(sessionDir, "subagents");
+  const dir = join3(sessionDir, "subagents");
   const entries = await readdir(dir, { withFileTypes: true }).catch(ignoreMissing);
-  return entries.filter((e) => e.isFile() && SUBAGENT_FILE.test(e.name)).map((e) => join2(dir, e.name)).sort();
+  return entries.filter((e) => e.isFile() && SUBAGENT_FILE.test(e.name)).map((e) => join3(dir, e.name)).sort();
 }
 function ignoreMissing(err) {
   if (err.code === "ENOENT" || err.code === "ENOTDIR") return [];
@@ -316,14 +655,14 @@ function inRoot(cwd, root, project) {
   return c === r || c.startsWith(r.endsWith(sep) ? r : r + sep);
 }
 async function readSession(projectsDir, project, id, opts, window) {
-  const transcript = join2(projectsDir, project, `${id}.jsonl`);
-  const info = await stat(transcript);
+  const transcript = join3(projectsDir, project, `${id}.jsonl`);
+  const info = await stat2(transcript);
   if (info.mtime.toISOString().slice(0, 10) < window.start) return void 0;
   const head = await readHead(transcript, opts.root !== void 0, window);
   if (!head.day || head.day < window.start || head.day > window.end) return void 0;
   if (opts.root !== void 0 && !inRoot(head.cwd, opts.root, project)) return void 0;
-  const subs = await subagentFiles(join2(projectsDir, project, id));
-  const sizes = await Promise.all(subs.map(async (f2) => (await stat(f2)).size));
+  const subs = await subagentFiles(join3(projectsDir, project, id));
+  const sizes = await Promise.all(subs.map(async (f2) => (await stat2(f2)).size));
   return {
     project,
     id,
@@ -339,7 +678,7 @@ async function collect(opts) {
   const projects = (await readdir(opts.projectsDir, { withFileTypes: true }).catch(ignoreMissing)).filter((e) => e.isDirectory() && foldCase(e.name).startsWith(prefix)).map((e) => e.name).sort();
   const sessions = [];
   for (const project of projects) {
-    const entries = await readdir(join2(opts.projectsDir, project), { withFileTypes: true }).catch(ignoreMissing);
+    const entries = await readdir(join3(opts.projectsDir, project), { withFileTypes: true }).catch(ignoreMissing);
     const ids = entries.filter((e) => e.isFile() && e.name.endsWith(".jsonl")).map((e) => e.name.slice(0, -".jsonl".length)).filter((id) => !exclude.some((x) => id.startsWith(x))).sort();
     for (const id of ids) {
       try {
@@ -357,8 +696,8 @@ function archivePath(projectsDir, file) {
 }
 
 // cli/src/pack.ts
-import { realpath, stat as stat2 } from "node:fs/promises";
-import { join as join4, sep as sep2 } from "node:path";
+import { realpath, stat as stat3 } from "node:fs/promises";
+import { join as join5, sep as sep2 } from "node:path";
 
 // node_modules/.pnpm/tar@7.5.22/node_modules/tar/dist/esm/index.min.js
 import Qr from "events";
@@ -3331,8 +3670,8 @@ var To = (s3) => {
 
 // cli/src/preview.ts
 import { createReadStream as createReadStream2, createWriteStream } from "node:fs";
-import { mkdir as mkdir2, mkdtemp, readFile as readFile2, rm, writeFile as writeFile2 } from "node:fs/promises";
-import { dirname, join as join3 } from "node:path";
+import { mkdir as mkdir3, mkdtemp, readFile as readFile3, rm as rm2, writeFile as writeFile3 } from "node:fs/promises";
+import { dirname, join as join4 } from "node:path";
 import { createInterface as createInterface2 } from "node:readline";
 import { pipeline } from "node:stream/promises";
 
@@ -3658,15 +3997,15 @@ async function redactJsonlFile(src, dst, counts, home) {
   return bytes;
 }
 async function redactFile(src, dst, counts, home) {
-  await mkdir2(dirname(dst), { recursive: true, mode: 448 });
+  await mkdir3(dirname(dst), { recursive: true, mode: 448 });
   if (src.endsWith(".jsonl")) return redactJsonlFile(src, dst, counts, home);
-  const body = redactJson(await readFile2(src, "utf8"), counts, home);
-  await writeFile2(dst, body, { mode: 384 });
+  const body = redactJson(await readFile3(src, "utf8"), counts, home);
+  await writeFile3(dst, body, { mode: 384 });
   return Buffer.byteLength(body);
 }
 async function ensureIgnored(revefiDir) {
-  await mkdir2(revefiDir, { recursive: true, mode: 448 });
-  await writeFile2(join3(revefiDir, ".gitignore"), "*\n", { flag: "wx" }).catch(
+  await mkdir3(revefiDir, { recursive: true, mode: 448 });
+  await writeFile3(join4(revefiDir, ".gitignore"), "*\n", { flag: "wx" }).catch(
     (err) => {
       if (err.code !== "EEXIST") throw err;
     }
@@ -3684,7 +4023,7 @@ async function previewSession(dir, s3, opts) {
     const path = uploadPath(opts.projectsDir, file, opts.home);
     bytes += await redactFile(
       file,
-      join3(dir, ...path.split("/")),
+      join4(dir, ...path.split("/")),
       counts,
       opts.home
     );
@@ -3701,10 +4040,10 @@ async function previewSession(dir, s3, opts) {
 }
 async function writePreview(opts) {
   await ensureIgnored(opts.revefiDir);
-  const base = join3(opts.revefiDir, "upload-preview");
-  await mkdir2(base, { recursive: true, mode: 448 });
+  const base = join4(opts.revefiDir, "upload-preview");
+  await mkdir3(base, { recursive: true, mode: 448 });
   const stamp = (opts.now ?? /* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
-  const dir = await mkdtemp(join3(base, `${stamp}-`));
+  const dir = await mkdtemp(join4(base, `${stamp}-`));
   try {
     const meta = {
       window: opts.window,
@@ -3718,8 +4057,8 @@ async function writePreview(opts) {
         ps2 = await previewSession(dir, s3, opts);
       } catch (err) {
         if (err.code !== "ENOENT") throw err;
-        await rm(
-          join3(
+        await rm2(
+          join4(
             dir,
             "projects",
             aliasProjectDir(s3.project, opts.home),
@@ -3727,8 +4066,8 @@ async function writePreview(opts) {
           ),
           { force: true }
         );
-        await rm(
-          join3(dir, "projects", aliasProjectDir(s3.project, opts.home), s3.id),
+        await rm2(
+          join4(dir, "projects", aliasProjectDir(s3.project, opts.home), s3.id),
           { recursive: true, force: true }
         );
         continue;
@@ -3737,18 +4076,18 @@ async function writePreview(opts) {
       add(meta.counts, ps2.counts);
       meta.bytes += ps2.bytes;
     }
-    await writeFile2(
-      join3(dir, PREVIEW_META),
+    await writeFile3(
+      join4(dir, PREVIEW_META),
       `${JSON.stringify(meta, null, 2)}
 `,
       { mode: 384 }
     );
-    await writeFile2(join3(dir, REPORT_FILE), renderReport(meta), {
+    await writeFile3(join4(dir, REPORT_FILE), renderReport(meta), {
       mode: 384
     });
     return { dir, meta };
   } catch (err) {
-    await rm(dir, { recursive: true, force: true });
+    await rm2(dir, { recursive: true, force: true });
     throw err;
   }
 }
@@ -3759,10 +4098,10 @@ function safePath(p2) {
   return typeof p2 === "string" && SAFE_PATH.test(p2) && !p2.split("/").some((seg) => seg === ".." || seg === ".");
 }
 async function readPreview(dir) {
-  const file = join3(dir, PREVIEW_META);
+  const file = join4(dir, PREVIEW_META);
   let text;
   try {
-    text = await readFile2(file, "utf8");
+    text = await readFile3(file, "utf8");
   } catch (err) {
     if (err.code !== "ENOENT") throw err;
     throw new PreviewError(`No preview at ${dir}. Previews are removed once uploaded; run \`prepare\` to make a new one.`);
@@ -3864,12 +4203,12 @@ async function pack(previewDir, meta, outFile) {
     },
     paths
   );
-  return { compressed: (await stat2(outFile)).size, uncompressed };
+  return { compressed: (await stat3(outFile)).size, uncompressed };
 }
 async function assertInside(root, path) {
   let real;
   try {
-    real = await realpath(join4(root, ...path.split("/")));
+    real = await realpath(join5(root, ...path.split("/")));
   } catch (err) {
     if (err.code !== "ENOENT") throw err;
     throw new PreviewError(
@@ -3955,7 +4294,24 @@ function apiBase(e, api) {
 function machineDir(e, base) {
   const root = e.configDir ?? configDir(e.env);
   const host = new URL(base).host;
-  return host === new URL(DEFAULT_API).host ? root : join5(root, "servers", host.replace(/[^\w.-]/g, "_"));
+  return host === new URL(DEFAULT_API).host ? root : join6(root, "servers", host.replace(/[^\w.-]/g, "_"));
+}
+var loginCommand = (api) => `revefi-agent-analyzer login${api ? ` --api ${quote(api)}` : ""}`;
+function auth(e, api) {
+  const base = apiBase(e, api);
+  return new Auth({ base, dir: machineDir(e, base), fetch: e.fetch, sleep: e.sleep, env: e.env, loginCommand: loginCommand(api) });
+}
+function openInBrowser(url) {
+  if (process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return;
+  const [cmd, args] = process.platform === "darwin" ? ["open", [url]] : process.platform === "win32" ? ["rundll32", ["url.dll,FileProtocolHandler", url]] : ["xdg-open", [url]];
+  const child = spawn(cmd, args, { stdio: "ignore", detached: true, windowsHide: true });
+  child.on("error", () => void 0);
+  child.unref();
+}
+function describeLogin(e, p2) {
+  e.io.err(`Open this link to sign in with Google:
+  ${p2.verification_uri_complete}`);
+  e.io.err(`Check that the page shows the code ${p2.user_code}, then approve it.`);
 }
 async function client(e, api) {
   const base = apiBase(e, api);
@@ -4002,8 +4358,8 @@ function redactionLine(meta) {
 }
 var UPLOAD_TO = "upload_to";
 async function checkHost(dir, base) {
-  const file = join5(dir, UPLOAD_TO);
-  const recorded = existsSync(file) ? (await readFile3(file, "utf8")).trim() : "";
+  const file = join6(dir, UPLOAD_TO);
+  const recorded = existsSync(file) ? (await readFile4(file, "utf8")).trim() : "";
   const host = new URL(base).host;
   if (recorded && recorded !== host) {
     throw new UserError(`This preview was prepared for ${recorded}, not ${host}. Run \`prepare\` again for ${host}, or pass --api for ${recorded}.`);
@@ -4023,8 +4379,8 @@ async function prepareFrom(e, values) {
   });
   const empty = limitProblem({ window, session_count: sessions.length, bytes: { compressed: 0, uncompressed: 0 } });
   if (empty) throw new UserError(empty);
-  const { dir, meta } = await writePreview({ projectsDir, window, sessions, revefiDir: join5(root, ".revefi"), home: homedir3() });
-  await writeFile3(join5(dir, UPLOAD_TO), `${new URL(apiBase(e, values.api)).host}
+  const { dir, meta } = await writePreview({ projectsDir, window, sessions, revefiDir: join6(root, ".revefi"), home: homedir3() });
+  await writeFile4(join6(dir, UPLOAD_TO), `${new URL(apiBase(e, values.api)).host}
 `, { mode: 384 });
   return { dir, meta, sourceBytes: sessions.reduce((a, s3) => a + s3.bytes, 0), scope: all ? "all projects on this machine" : root };
 }
@@ -4043,7 +4399,7 @@ async function consent(e, values, dir) {
   if (values.yes) return true;
   if (values.json || !e.isTTY) {
     e.io.err(
-      `Nothing was uploaded: there is no terminal here to confirm it. Review ${quote(join5(relative2(e.cwd, dir) || ".", REPORT_FILE))}, then run \`revefi-agent-analyzer upload ${quote(relative2(e.cwd, dir) || ".")}\` in a terminal.`
+      `Nothing was uploaded: there is no terminal here to confirm it. Review ${quote(join6(relative2(e.cwd, dir) || ".", REPORT_FILE))}, then run \`revefi-agent-analyzer upload ${quote(relative2(e.cwd, dir) || ".")}\` in a terminal.`
     );
     return false;
   }
@@ -4060,7 +4416,7 @@ function isPreviewFolder(dir) {
 async function uploadPreview(e, dir, api) {
   const meta = await readPreview(dir);
   await checkHost(dir, apiBase(e, api));
-  const archive = join5(dir, "upload.tar.gz");
+  const archive = join6(dir, "upload.tar.gz");
   try {
     const packed = await pack(dir, meta, archive);
     const manifest = buildManifest(meta, packed, { name: clientName(e), version: e.version });
@@ -4073,10 +4429,10 @@ async function uploadPreview(e, dir, api) {
     const status = await c.complete(run.run_id);
     const reportUrl = c.link(run.report_url);
     e.io.err(`Run ${run.run_id} started. Report: ${reportUrl}`);
-    if (isPreviewFolder(dir)) await rm2(dir, { recursive: true, force: true });
+    if (isPreviewFolder(dir)) await rm3(dir, { recursive: true, force: true });
     return { c, runId: run.run_id, reportUrl, status };
   } finally {
-    await rm2(archive, { force: true });
+    await rm3(archive, { force: true });
   }
 }
 var PHASE_COPY = {
@@ -4152,6 +4508,66 @@ The run was started; check it later with: revefi-agent-analyzer status ${run.run
   return finish(e, s3, run.runId);
 }
 var COMMANDS = {
+  login: {
+    summary: "Sign in with Google (--start and --wait split it in two, for scripts)",
+    async run(args, e) {
+      const { values } = parse(args, {
+        ...API_OPTION,
+        start: { type: "boolean" },
+        wait: { type: "boolean" },
+        json: { type: "boolean" },
+        "no-browser": { type: "boolean" },
+        timeout: { type: "string" }
+      });
+      if (values.start && values.wait) throw new UsageError("Use --start or --wait, not both.");
+      const a = auth(e, values.api);
+      if (!values.wait) {
+        const pending = await a.startLogin();
+        if (values.start) {
+          if (values.json) {
+            e.io.out(
+              JSON.stringify({
+                verification_uri_complete: pending.verification_uri_complete,
+                user_code: pending.user_code,
+                expires_in: Math.round((pending.expires_at - Date.now()) / 1e3)
+              })
+            );
+          } else {
+            describeLogin(e, pending);
+            e.io.err(`Then run: ${loginCommand(values.api)} --wait`);
+          }
+          return 0;
+        }
+        describeLogin(e, pending);
+        if (e.isTTY && !values["no-browser"]) (e.openUrl ?? openInBrowser)(pending.verification_uri_complete);
+      }
+      const timeout = values.timeout === void 0 ? void 0 : wholeNumber(values.timeout, "--timeout", 0, 1) * 1e3;
+      const { email } = await a.finishLogin({ timeoutMs: timeout });
+      if (values.json) e.io.out(JSON.stringify({ email }));
+      else e.io.out(email ? `Signed in as ${email}.` : "Signed in.");
+      return 0;
+    }
+  },
+  logout: {
+    summary: "Sign out on this computer",
+    async run(args, e) {
+      const { values } = parse(args, API_OPTION);
+      const { signedIn, revoked } = await auth(e, values.api).logout();
+      if (!signedIn) e.io.out("You weren't signed in.");
+      else if (revoked) e.io.out("Signed out.");
+      else e.io.out("Signed out on this computer. The session couldn't be ended on the server; it expires on its own.");
+      return 0;
+    }
+  },
+  whoami: {
+    summary: "Show who you're signed in as",
+    async run(args, e) {
+      const { values } = parse(args, { ...API_OPTION, json: { type: "boolean" } });
+      const email = await auth(e, values.api).email();
+      e.io.out(values.json ? JSON.stringify({ email }) : email ? `Signed in as ${email}.` : "Signed in (email unavailable).");
+      return 0;
+    }
+  },
   analyze: {
     summary: "Collect, redact, preview, upload and wait for the report (asks before uploading)",
     async run(args, e) {
@@ -4174,7 +4590,7 @@ var COMMANDS = {
         e.io.out(
           JSON.stringify({
             preview_dir: p2.dir,
-            report: join5(p2.dir, REPORT_FILE),
+            report: join6(p2.dir, REPORT_FILE),
             scope: p2.scope,
             window: p2.meta.window,
             sessions: p2.meta.sessions.length,
@@ -4268,7 +4684,7 @@ var COMMANDS = {
     summary: "Delete every run, upload and report made from this machine",
     async run(args, e) {
       const { values } = parse(args, { ...API_OPTION, yes: { type: "boolean", short: "y" } });
-      if (!existsSync(join5(machineDir(e, apiBase(e, values.api)), "machine-id"))) {
+      if (!existsSync(join6(machineDir(e, apiBase(e, values.api)), "machine-id"))) {
         e.io.out("Nothing to delete: nothing has been uploaded from this machine.");
         return 0;
       }
@@ -4314,13 +4730,20 @@ Options for analyze and prepare:
   --all-projects         Every project on this machine, not just this repository
   --exclude-session ID   Leave a session out (repeatable; a prefix of the id is enough)
 
+Options for login:
+  --start                Print the sign-in link and code, then exit (--json for a script)
+  --wait                 Wait for a started sign-in to be approved
+  --no-browser           Don't open the browser; just print the link
+
 Other options:
   -y, --yes              Don't ask before uploading (analyze, upload) or deleting (delete-my-data)
-  --json                 One JSON object on stdout (prepare, upload, status, recommendations);
+  --json                 One JSON object on stdout (login, whoami, prepare, upload, status,
+                         recommendations);
                          progress and messages go to stderr; errors print {"error": ...}
   --wait                 status: follow the run until it finishes
   --no-wait              upload: return as soon as the analysis has started
-  --timeout SECONDS      How long to wait for the report (analyze 1800, upload and status 480)
+  --timeout SECONDS      How long to wait for the report (analyze 1800, upload and status 480),
+                         or for login to be approved (default: until the code expires)
   --api URL              Analyzer server (default REVEFI_ANALYZER_API, else analyzer.revefi.com)
   -h, --help             Show this help
   -v, --version          Show the version
@@ -4344,6 +4767,7 @@ function defaultEnv(io2 = consoleIo) {
 }
 function classify(err, debug) {
   if (err instanceof UsageError) return { kind: "usage", message: err.message };
+  if (err instanceof SignInError) return { kind: "sign_in", message: err.message };
   if (err instanceof ApiError) return { kind: "server", message: err.message, status: err.status };
   if (err instanceof UserError || err instanceof PreviewError) return { kind: "refused", message: err.message };
   const e = err;

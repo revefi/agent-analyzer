@@ -286,3 +286,83 @@ describe("project scope", () => {
     expect(p.preview_dir.startsWith(join(realpathSync(repo), ".revefi", "upload-preview"))).toBe(true);
   });
 });
+
+describe("sign-in", () => {
+  const AUTH0 = {
+    "GET /api/auth/config": () => json(200, { domain: "auth.test", audience: "https://api.test/api", web_client_id: "w", cli_client_id: "cli" }),
+    "POST /oauth/device/code": () =>
+      json(200, {
+        device_code: "dev-1",
+        user_code: "ABCD-EFGH",
+        verification_uri_complete: "https://auth.test/activate?user_code=ABCD-EFGH",
+        expires_in: 900,
+        interval: 5,
+      }),
+    "POST /oauth/token": () =>
+      json(200, {
+        access_token: "at-1",
+        refresh_token: "rt-1",
+        id_token: `h.${Buffer.from(JSON.stringify({ email: "ada@example.com" })).toString("base64url")}.s`,
+        expires_in: 3600,
+      }),
+    "POST /oauth/revoke": () => new Response(null, { status: 200 }),
+  };
+  beforeEach(() => rmSync(join(tmp, "config"), { recursive: true, force: true }));
+
+  it("splits in two for the plugin: the link and code first, then the wait", async () => {
+    const start = await run(["login", "--start", "--json"], { srv: fakeFetch(AUTH0) });
+    expect(start.code).toBe(0);
+    expect(JSON.parse(start.out)).toMatchObject({
+      user_code: "ABCD-EFGH",
+      verification_uri_complete: "https://auth.test/activate?user_code=ABCD-EFGH",
+    });
+    expect(start.out).not.toContain("dev-1");
+
+    const done = await run(["login", "--wait", "--json"], { srv: fakeFetch(AUTH0) });
+    expect(done.code).toBe(0);
+    expect(JSON.parse(done.out)).toEqual({ email: "ada@example.com" });
+
+    const who = await run(["whoami"], { srv: fakeFetch(AUTH0) });
+    expect(who.out).toBe("Signed in as ada@example.com.");
+  });
+
+  it("opens the browser in a terminal, and prints the link either way", async () => {
+    const opened: string[] = [];
+    const srv = fakeFetch(AUTH0);
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await main(["login"], {
+      io: { out: (s) => out.push(s), err: (s) => err.push(s) },
+      version: "0.1.0",
+      cwd: repo,
+      env: { REVEFI_ANALYZER_API: "https://api.test" },
+      isTTY: true,
+      ask: async () => false,
+      fetch: srv.fetch,
+      sleep: async () => undefined,
+      configDir: join(tmp, "config"),
+      openUrl: (url) => opened.push(url),
+    });
+    expect(code).toBe(0);
+    expect(opened).toEqual(["https://auth.test/activate?user_code=ABCD-EFGH"]);
+    expect(err.join("\n")).toContain("Check that the page shows the code ABCD-EFGH");
+    expect(out.join("\n")).toBe("Signed in as ada@example.com.");
+  });
+
+  it("reports a missing sign-in as its own error kind for scripts", async () => {
+    const r = await run(["whoami", "--json"], { srv: fakeFetch(AUTH0) });
+    expect(r.code).toBe(1);
+    expect(JSON.parse(r.out)).toEqual({
+      error: { kind: "sign_in", message: "You're not signed in to api.test. Run `revefi-agent-analyzer login` first." },
+    });
+  });
+
+  it("signs out, revoking the session", async () => {
+    await run(["login", "--start"], { srv: fakeFetch(AUTH0) });
+    await run(["login", "--wait"], { srv: fakeFetch(AUTH0) });
+    const r = await run(["logout"], { srv: fakeFetch(AUTH0) });
+    expect(r.out).toBe("Signed out.");
+    expect(calls(r.seen)).toEqual(["POST /oauth/revoke"]);
+    expect((await run(["logout"], { srv: fakeFetch(AUTH0) })).out).toBe("You weren't signed in.");
+  });
+});
