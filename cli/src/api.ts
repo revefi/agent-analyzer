@@ -1,7 +1,6 @@
-import { randomBytes } from "node:crypto";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { SignInError } from "./auth.js";
 import { unreachable } from "./net.js";
 import type { Manifest } from "./pack.js";
 
@@ -52,6 +51,13 @@ export interface Recommendations {
   root_causes: { id: string; title: string; window_usd: number; annualized_usd: number }[];
 }
 
+/** Who besides the owner can open a report. */
+export interface Sharing {
+  /** Anyone signed in who has the link. */
+  link: boolean;
+  emails: string[];
+}
+
 export interface Feedback {
   verdict: "up" | "down";
   source: "user" | "skill";
@@ -76,34 +82,12 @@ export function configDir(env: NodeJS.ProcessEnv = process.env): string {
   return join(base, "revefi", "agent-analyzer");
 }
 
-const MACHINE_ID = /^[0-9a-f]{32,128}$/;
-
-/**
- * A random id for this machine, created once. The server stores only a keyed hash of it, and it
- * is the only way back to this machine's runs, so it is never silently replaced.
- */
-export async function loadMachineId(dir: string = configDir()): Promise<string> {
-  const file = join(dir, "machine-id");
-  const id = randomBytes(32).toString("hex");
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  try {
-    await writeFile(file, `${id}\n`, { flag: "wx", mode: 0o600 });
-    return id;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-  }
-  await chmod(file, 0o600);
-  const existing = (await readFile(file, "utf8")).trim();
-  if (MACHINE_ID.test(existing)) return existing;
-  throw new ApiError(
-    `${file} is damaged. Restore it from a backup, or delete it to start over as a new machine ` +
-      "(you would lose access to reports made from this machine so far).",
-  );
-}
-
 export interface ClientOptions {
   base: string;
-  machineId: string;
+  /** The signed-in user's access token; `force` asks for a fresh one after a 401. */
+  token: (force: boolean) => Promise<string>;
+  /** The command that signs in to this server, for messages. */
+  loginCommand?: string;
   userAgent: string;
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
@@ -114,7 +98,6 @@ interface Call {
   method: string;
   path: string;
   body?: unknown;
-  auth?: boolean;
   /** False when repeating the call after a lost response could create a second record. */
   idempotent?: boolean;
   /** Copy for a 409 on this call, which means different things on different routes. */
@@ -125,13 +108,12 @@ interface Call {
 
 const MAX_RETRY_WAIT_MS = 60_000;
 const CALL_TIMEOUT_MS = 30_000;
-const RUN_NOT_FOUND = "Run not found. Runs can only be managed from the machine that uploaded them, and deleted runs are gone.";
+const RUN_NOT_FOUND = "Run not found. Only the account that uploaded a run can manage it, and deleted runs are gone.";
 
 /** Ends a sentence once, whether or not the server's text already did. */
 const sentence = (s: string) => (/[.!?]$/.test(s.trim()) ? s.trim() : `${s.trim()}.`);
 
 export class Client {
-  private token?: string;
   private readonly fetch: typeof fetch;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly env: NodeJS.ProcessEnv;
@@ -158,23 +140,11 @@ export class Client {
     }
   }
 
-  private async deviceToken(): Promise<string> {
-    if (!this.token) {
-      const res = await this.call<{ device_token: string }>({
-        method: "POST",
-        path: "/api/device",
-        body: { machine_id: this.opts.machineId },
-        auth: false,
-      });
-      this.token = res.device_token;
-    }
-    return this.token;
-  }
-
-  private async call<T>(c: Call, attempt = 0, refreshed = false): Promise<T> {
+  /** `force` renews the token, only on the call straight after a 401; retries reuse the renewed one. */
+  private async call<T>(c: Call, attempt = 0, refreshed = false, force = false): Promise<T> {
     const headers: Record<string, string> = { "user-agent": this.opts.userAgent, accept: "application/json" };
     if (c.body !== undefined) headers["content-type"] = "application/json";
-    if (c.auth !== false) headers.authorization = `Bearer ${await this.deviceToken()}`;
+    headers.authorization = `Bearer ${await this.opts.token(force)}`;
     const res = await this.send(
       `${this.base}${c.path}`,
       {
@@ -193,9 +163,10 @@ export class Client {
       await this.sleep(wait);
       return this.call(c, attempt + 1, refreshed);
     }
-    if (res.status === 401 && c.auth !== false && !refreshed) {
-      this.token = undefined;
-      return this.call(c, attempt, true);
+    if (res.status === 401) {
+      if (!refreshed) return this.call(c, attempt, true, true);
+      const login = this.opts.loginCommand ?? "revefi-agent-analyzer login";
+      throw new SignInError(`Your sign-in wasn't accepted. Run \`${login}\` again.`, "signed_out");
     }
     throw new ApiError(explain(res, detail, c), res.status);
   }
@@ -272,11 +243,15 @@ export class Client {
     });
   }
 
-  setVisibility(runId: string, visibility: "private" | "link"): Promise<{ visibility: string }> {
+  sharing(runId: string): Promise<Sharing> {
+    return this.call({ method: "GET", path: `/api/runs/${encodeURIComponent(runId)}/sharing`, notFound: RUN_NOT_FOUND });
+  }
+
+  setSharing(runId: string, sharing: Sharing): Promise<Sharing> {
     return this.call({
-      method: "POST",
-      path: `/api/runs/${encodeURIComponent(runId)}/visibility`,
-      body: { visibility },
+      method: "PUT",
+      path: `/api/runs/${encodeURIComponent(runId)}/sharing`,
+      body: sharing,
       notFound: RUN_NOT_FOUND,
     });
   }
@@ -320,8 +295,6 @@ function retryDelayMs(res: Response, attempt: number, idempotent: boolean): numb
 
 function explain(res: Response, detail: string, c: Call): string {
   switch (res.status) {
-    case 401:
-      return `The server didn't accept this machine's token. Try again; if it keeps failing, report it at ${ISSUES_URL}.`;
     case 404:
       return c.notFound ?? sentence(detail || "Not found");
     case 409:

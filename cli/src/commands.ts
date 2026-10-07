@@ -11,12 +11,12 @@ import {
   DEFAULT_API,
   FINAL_PHASES,
   ISSUES_URL,
-  loadMachineId,
   type Recommendation,
   type Recommendations,
   type RunStatus,
+  type Sharing,
 } from "./api.js";
-import { Auth, type PendingLogin } from "./auth.js";
+import { Auth, type PendingLogin, SignInError } from "./auth.js";
 import { collect, defaultProjectsDir, utcToday } from "./collect.js";
 import { buildManifest, LIMITS, limitProblem, pack } from "./pack.js";
 import { humanSize, type PreviewMeta, readPreview, REPORT_FILE, writePreview } from "./preview.js";
@@ -100,10 +100,10 @@ function apiBase(e: Env, api?: string): string {
 }
 
 /**
- * Each server gets its own machine id, so a repository that points the CLI at another server
- * never learns the id that unlocks this machine's runs on the default one.
+ * Each server gets its own sign-in, so a repository that points the CLI at another server never
+ * receives the refresh token for the default one.
  */
-function machineDir(e: Env, base: string): string {
+function serverDir(e: Env, base: string): string {
   const root = e.configDir ?? configDir(e.env);
   const host = new URL(base).host;
   return host === new URL(DEFAULT_API).host ? root : join(root, "servers", host.replace(/[^\w.-]/g, "_"));
@@ -113,7 +113,7 @@ const loginCommand = (api?: string) => `revefi-agent-analyzer login${api ? ` --a
 
 function auth(e: Env, api?: string): Auth {
   const base = apiBase(e, api);
-  return new Auth({ base, dir: machineDir(e, base), fetch: e.fetch, sleep: e.sleep, env: e.env, loginCommand: loginCommand(api) });
+  return new Auth({ base, dir: serverDir(e, base), fetch: e.fetch, sleep: e.sleep, env: e.env, loginCommand: loginCommand(api) });
 }
 
 /** Opens the sign-in page without a shell, so the URL is never interpreted as a command. */
@@ -137,10 +137,39 @@ function describeLogin(e: Env, p: PendingLogin): void {
   e.io.err(`Check that the page shows the code ${p.user_code}, then approve it.`);
 }
 
-async function client(e: Env, api?: string): Promise<Client> {
-  const base = apiBase(e, api);
-  const machineId = await loadMachineId(machineDir(e, base));
-  return new Client({ base, machineId, userAgent: `revefi-agent-analyzer/${e.version}`, fetch: e.fetch, sleep: e.sleep, env: e.env });
+function client(e: Env, api?: string, a: Auth = auth(e, api)): Client {
+  return new Client({
+    base: apiBase(e, api),
+    token: (force) => a.accessToken(force),
+    loginCommand: loginCommand(api),
+    userAgent: `revefi-agent-analyzer/${e.version}`,
+    fetch: e.fetch,
+    sleep: e.sleep,
+    env: e.env,
+  });
+}
+
+/** Starts a device login, shows the link (opening it when asked) and waits for approval. */
+async function signIn(e: Env, a: Auth, openBrowser: boolean, timeoutMs?: number): Promise<string | null> {
+  const pending = await a.startLogin();
+  describeLogin(e, pending);
+  if (openBrowser) (e.openUrl ?? openInBrowser)(pending.verification_uri_complete);
+  return (await a.finishLogin({ timeoutMs })).email;
+}
+
+/**
+ * Checks the sign-in still works (renewing it if needed); in a terminal, signs in on the spot
+ * when that is what's missing, otherwise the caller gets the error.
+ */
+async function ensureSignedIn(e: Env, a: Auth): Promise<void> {
+  try {
+    await a.accessToken();
+    return;
+  } catch (err) {
+    if (!(err instanceof SignInError) || err.reason !== "signed_out" || !e.isTTY) throw err;
+  }
+  const email = await signIn(e, a, true);
+  e.io.err(email ? `Signed in as ${email}.` : "Signed in.");
 }
 
 function wholeNumber(raw: string | undefined, flag: string, fallback: number, min: number, max = Number.MAX_SAFE_INTEGER): number {
@@ -270,16 +299,17 @@ interface Started {
   status: RunStatus;
 }
 
-async function uploadPreview(e: Env, dir: string, api?: string): Promise<Started> {
+async function uploadPreview(e: Env, dir: string, api?: string, a: Auth = auth(e, api)): Promise<Started> {
   const meta = await readPreview(dir);
   await checkHost(dir, apiBase(e, api));
+  await ensureSignedIn(e, a);
   const archive = join(dir, "upload.tar.gz");
   try {
     const packed = await pack(dir, meta, archive);
     const manifest = buildManifest(meta, packed, { name: clientName(e), version: e.version });
     const problem = limitProblem(manifest);
     if (problem) throw new UserError(problem);
-    const c = await client(e, api);
+    const c = client(e, api, a);
     e.io.err(`Uploading ${humanSize(packed.compressed)}...`);
     const run = await c.createRun(manifest);
     await c.upload(run.upload, await openAsBlob(archive));
@@ -388,28 +418,26 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
       });
       if (values.start && values.wait) throw new UsageError("Use --start or --wait, not both.");
       const a = auth(e, values.api);
-      if (!values.wait) {
+      if (values.start) {
         const pending = await a.startLogin();
-        if (values.start) {
-          if (values.json) {
-            e.io.out(
-              JSON.stringify({
-                verification_uri_complete: pending.verification_uri_complete,
-                user_code: pending.user_code,
-                expires_in: Math.round((pending.expires_at - Date.now()) / 1000),
-              }),
-            );
-          } else {
-            describeLogin(e, pending);
-            e.io.err(`Then run: ${loginCommand(values.api)} --wait`);
-          }
-          return 0;
+        if (values.json) {
+          e.io.out(
+            JSON.stringify({
+              verification_uri_complete: pending.verification_uri_complete,
+              user_code: pending.user_code,
+              expires_in: Math.round((pending.expires_at - Date.now()) / 1000),
+            }),
+          );
+        } else {
+          describeLogin(e, pending);
+          e.io.err(`Then run: ${loginCommand(values.api)} --wait`);
         }
-        describeLogin(e, pending);
-        if (e.isTTY && !values["no-browser"]) (e.openUrl ?? openInBrowser)(pending.verification_uri_complete);
+        return 0;
       }
       const timeout = values.timeout === undefined ? undefined : wholeNumber(values.timeout, "--timeout", 0, 1) * 1000;
-      const { email } = await a.finishLogin({ timeoutMs: timeout });
+      const email = values.wait
+        ? (await a.finishLogin({ timeoutMs: timeout })).email
+        : await signIn(e, a, e.isTTY && !values["no-browser"], timeout);
       if (values.json) e.io.out(JSON.stringify({ email }));
       else e.io.out(email ? `Signed in as ${email}.` : "Signed in.");
       return 0;
@@ -441,10 +469,14 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
       const { values } = parse(args, { ...SCOPE_OPTIONS, ...API_OPTION, yes: { type: "boolean", short: "y" }, timeout: { type: "string" } });
       const timeout = wholeNumber(values.timeout, "--timeout", 30 * 60, 0);
       const api = apiBase(e, values.api);
+      const a = auth(e, values.api);
+      // In a terminal, sign in before the preview so the upload never stops for it; elsewhere the
+      // upload step reports a missing sign-in.
+      if (e.isTTY) await ensureSignedIn(e, a);
       const p = await prepareFrom(e, values);
       describePreview(e, p, api);
       if (!(await consent(e, values, p.dir))) return 1;
-      return follow(e, await uploadPreview(e, p.dir, values.api), timeout, false);
+      return follow(e, await uploadPreview(e, p.dir, values.api, a), timeout, false);
     },
   },
   prepare: {
@@ -504,7 +536,7 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
       const { values, positionals } = parse(args, { ...API_OPTION, wait: { type: "boolean" }, json: { type: "boolean" }, timeout: { type: "string" } }, 1);
       const timeout = wholeNumber(values.timeout, "--timeout", 480, 0);
       const runId = positionals[0] ?? "";
-      const c = await client(e, values.api);
+      const c = client(e, values.api);
       const s = await c.status(runId);
       const reportUrl = c.link(s.report_url);
       if (values.wait) return follow(e, { c, runId, reportUrl }, timeout, Boolean(values.json));
@@ -516,7 +548,7 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
     summary: "Print a finished run's recommendations (--json for the full list)",
     async run(args, e) {
       const { values, positionals } = parse(args, { ...API_OPTION, json: { type: "boolean" } }, 1);
-      const recs = await (await client(e, values.api)).recommendations(positionals[0] ?? "");
+      const recs = await client(e, values.api).recommendations(positionals[0] ?? "");
       if (values.json) e.io.out(JSON.stringify(recs));
       else printSummary(e, recs);
       return 0;
@@ -529,44 +561,63 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
       const [runId = "", recId = "", verdict = ""] = positionals;
       if (verdict !== "up" && verdict !== "down") throw new UsageError("The rating must be up or down.");
       const pr = values["applied-pr"];
-      await (await client(e, values.api)).feedback(runId, recId, pr ? { verdict, source: "skill", applied_pr_url: pr } : { verdict, source: "user" });
+      await client(e, values.api).feedback(runId, recId, pr ? { verdict, source: "skill", applied_pr_url: pr } : { verdict, source: "user" });
       e.io.out(pr ? "Recorded the applied fix. Thanks." : "Thanks, your rating was recorded.");
       return 0;
     },
   },
   share: {
-    summary: "Set who can open a run's report: share <run> private|link",
+    summary: "Show or change who can open a run's report: share <run> [--add EMAIL] [--remove EMAIL] [--link on|off]",
     async run(args, e) {
-      const { values, positionals } = parse(args, API_OPTION, 2);
-      const [runId = "", who = ""] = positionals;
-      if (who !== "private" && who !== "link") throw new UsageError("Choose private (only you) or link (anyone with the link).");
-      const c = await client(e, values.api);
-      await c.setVisibility(runId, who);
-      const s = await c.status(runId);
-      e.io.out(who === "link" ? `Anyone with the link can now open the report: ${c.link(s.report_url)}` : "The report is now private to this machine.");
+      const { values, positionals } = parse(
+        args,
+        { ...API_OPTION, add: { type: "string", multiple: true }, remove: { type: "string", multiple: true }, link: { type: "string" }, json: { type: "boolean" } },
+        1,
+      );
+      const runId = positionals[0] ?? "";
+      if (values.link !== undefined && values.link !== "on" && values.link !== "off") {
+        throw new UsageError("--link must be on (anyone signed in with the link) or off.");
+      }
+      const add = (values.add ?? []).map((email) => email.trim().toLowerCase());
+      const bad = add.find((email) => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email));
+      if (bad) throw new UsageError(`${bad} isn't an email address.`);
+      const c = client(e, values.api);
+      let sharing = await c.sharing(runId);
+      const remove = new Set((values.remove ?? []).map((email) => email.trim().toLowerCase()));
+      const next: Sharing = {
+        link: values.link === undefined ? sharing.link : values.link === "on",
+        emails: [...new Set([...sharing.emails, ...add])].filter((email) => !remove.has(email)),
+      };
+      if (add.length || remove.size || values.link !== undefined) sharing = await c.setSharing(runId, next);
+      const { report_url } = await c.status(runId);
+      if (values.json) {
+        e.io.out(JSON.stringify({ ...sharing, report_url: c.link(report_url) }));
+        return 0;
+      }
+      e.io.out(sharing.emails.length ? `Shared with: ${sharing.emails.join(", ")}` : "Not shared with anyone by email.");
+      e.io.out(sharing.link ? "Anyone signed in who has the link can open it." : "The link alone doesn't give access.");
+      e.io.out(`Report: ${c.link(report_url)}`);
       return 0;
     },
   },
   "delete-my-data": {
-    summary: "Delete every run, upload and report made from this machine",
+    summary: "Delete every run, upload and report made with your account",
     async run(args, e) {
       const { values } = parse(args, { ...API_OPTION, yes: { type: "boolean", short: "y" } });
-      if (!existsSync(join(machineDir(e, apiBase(e, values.api)), "machine-id"))) {
-        e.io.out("Nothing to delete: nothing has been uploaded from this machine.");
-        return 0;
-      }
+      const a = auth(e, values.api);
+      const email = (await a.email()) ?? "your account";
       if (!values.yes) {
         if (!e.isTTY) {
-          e.io.err("Nothing was deleted. Run again with --yes to delete every run, upload and report from this machine.");
+          e.io.err(`Nothing was deleted. Run again with --yes to delete every run, upload and report made with ${email}.`);
           return 1;
         }
-        if (!(await e.ask("Delete every run, upload and report from this machine? This can't be undone. [y/N] "))) {
+        if (!(await e.ask(`Delete every run, upload and report made with ${email}? This can't be undone. [y/N] `))) {
           e.io.err("Nothing was deleted.");
           return 1;
         }
       }
-      await (await client(e, values.api)).deleteMyData();
-      e.io.out("Deleted every run, upload and report from this machine. Local previews in .revefi/ are untouched.");
+      await client(e, values.api, a).deleteMyData();
+      e.io.out(`Deleted every run, upload and report made with ${email}. Local previews in .revefi/ are untouched.`);
       return 0;
     },
   },

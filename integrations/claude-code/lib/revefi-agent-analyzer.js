@@ -4,10 +4,12 @@
 import { parseArgs as parseArgs2 } from "node:util";
 
 // cli/src/api.ts
-import { randomBytes } from "node:crypto";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join as join2 } from "node:path";
+
+// cli/src/auth.ts
+import { link, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 // cli/src/net.ts
 function unreachable(err, host, env) {
@@ -19,238 +21,14 @@ function unreachable(err, host, env) {
   return `Couldn't reach ${host} (${why}). Check your connection and try again.${hint}`;
 }
 
-// cli/src/api.ts
-var DEFAULT_API = "https://analyzer.revefi.com";
-var ISSUES_URL = "https://github.com/revefi/agent-analyzer/issues";
-var FINAL_PHASES = ["done", "failed", "deferred"];
-var ApiError = class extends Error {
-  constructor(message, status) {
-    super(message);
-    this.status = status;
-    this.name = "ApiError";
-  }
-  status;
-};
-function configDir(env = process.env) {
-  const xdg = env.XDG_CONFIG_HOME && isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : void 0;
-  const base = xdg || process.platform === "win32" && env.APPDATA || join(homedir(), ".config");
-  return join(base, "revefi", "agent-analyzer");
-}
-var MACHINE_ID = /^[0-9a-f]{32,128}$/;
-async function loadMachineId(dir = configDir()) {
-  const file = join(dir, "machine-id");
-  const id = randomBytes(32).toString("hex");
-  await mkdir(dir, { recursive: true, mode: 448 });
-  try {
-    await writeFile(file, `${id}
-`, { flag: "wx", mode: 384 });
-    return id;
-  } catch (err) {
-    if (err.code !== "EEXIST") throw err;
-  }
-  await chmod(file, 384);
-  const existing = (await readFile(file, "utf8")).trim();
-  if (MACHINE_ID.test(existing)) return existing;
-  throw new ApiError(
-    `${file} is damaged. Restore it from a backup, or delete it to start over as a new machine (you would lose access to reports made from this machine so far).`
-  );
-}
-var MAX_RETRY_WAIT_MS = 6e4;
-var CALL_TIMEOUT_MS = 3e4;
-var RUN_NOT_FOUND = "Run not found. Runs can only be managed from the machine that uploaded them, and deleted runs are gone.";
-var sentence = (s3) => /[.!?]$/.test(s3.trim()) ? s3.trim() : `${s3.trim()}.`;
-var Client = class {
-  constructor(opts) {
-    this.opts = opts;
-    this.base = opts.base.replace(/\/+$/, "");
-    this.fetch = opts.fetch ?? globalThis.fetch;
-    this.sleep = opts.sleep ?? ((ms2) => new Promise((r) => setTimeout(r, ms2)));
-    this.env = opts.env ?? process.env;
-  }
-  opts;
-  token;
-  fetch;
-  sleep;
-  env;
-  base;
-  /** Absolute URL for a server-relative link such as a run's `report_url`. */
-  link(path) {
-    return new URL(path, `${this.base}/`).toString();
-  }
-  /** Never echoes the URL or the raw error: an upload URL carries a signature. */
-  async send(url, init, host) {
-    try {
-      return await this.fetch(url, init);
-    } catch (err) {
-      throw new ApiError(unreachable(err, host, this.env));
-    }
-  }
-  async deviceToken() {
-    if (!this.token) {
-      const res = await this.call({
-        method: "POST",
-        path: "/api/device",
-        body: { machine_id: this.opts.machineId },
-        auth: false
-      });
-      this.token = res.device_token;
-    }
-    return this.token;
-  }
-  async call(c, attempt = 0, refreshed = false) {
-    const headers = { "user-agent": this.opts.userAgent, accept: "application/json" };
-    if (c.body !== void 0) headers["content-type"] = "application/json";
-    if (c.auth !== false) headers.authorization = `Bearer ${await this.deviceToken()}`;
-    const res = await this.send(
-      `${this.base}${c.path}`,
-      {
-        method: c.method,
-        headers,
-        body: c.body === void 0 ? void 0 : JSON.stringify(c.body),
-        signal: AbortSignal.timeout(CALL_TIMEOUT_MS)
-      },
-      new URL(this.base).host
-    );
-    if (res.ok) return res.status === 204 ? void 0 : await res.json();
-    const detail = await errorDetail(res);
-    const wait = retryDelayMs(res, attempt, c.idempotent !== false);
-    if (wait !== void 0 && attempt < 2) {
-      await this.sleep(wait);
-      return this.call(c, attempt + 1, refreshed);
-    }
-    if (res.status === 401 && c.auth !== false && !refreshed) {
-      this.token = void 0;
-      return this.call(c, attempt, true);
-    }
-    throw new ApiError(explain(res, detail, c), res.status);
-  }
-  createRun(manifest) {
-    return this.call({ method: "POST", path: "/api/runs", body: manifest, idempotent: false });
-  }
-  /** PUTs the archive to the presigned URL; the signed headers must be sent exactly as given. */
-  async upload(target, body) {
-    const declared = Object.entries(target.headers).find(([k2]) => k2.toLowerCase() === "content-length")?.[1];
-    if (declared !== void 0 && Number(declared) !== body.size) {
-      throw new ApiError("The archive changed after it was packed. Run the command again.");
-    }
-    const timeout = Math.max(12e4, body.size / 5e4 * 1e3);
-    const res = await this.send(
-      target.url,
-      { method: target.method ?? "PUT", headers: target.headers, body, signal: AbortSignal.timeout(timeout) },
-      "storage"
-    );
-    if (res.ok) return;
-    const code = (await res.text()).match(/<Code>([A-Za-z]{1,64})<\/Code>/)?.[1];
-    const expired = res.status === 403 && Date.parse(target.expires_at) < Date.now();
-    const next = expired ? "The upload link expired. Run the command again." : res.status === 403 ? `Update the CLI, and if that doesn't help, report it at ${ISSUES_URL}.` : "Run the command again.";
-    throw new ApiError(`Storage rejected the upload (HTTP ${res.status}${code ? `, ${code}` : ""}). ${next}`, res.status);
-  }
-  complete(runId) {
-    return this.call({
-      method: "POST",
-      path: `/api/runs/${encodeURIComponent(runId)}/complete`,
-      conflict: "The server didn't receive the upload. Run the command again.",
-      notFound: RUN_NOT_FOUND
-    });
-  }
-  status(runId) {
-    return this.call({ method: "GET", path: `/api/runs/${encodeURIComponent(runId)}`, notFound: RUN_NOT_FOUND });
-  }
-  async waitForRun(runId, opts) {
-    const deadline = Date.now() + opts.timeoutMs;
-    for (; ; ) {
-      const s3 = await this.status(runId);
-      opts.onProgress?.(s3);
-      if (FINAL_PHASES.includes(s3.phase) || Date.now() >= deadline) return s3;
-      await this.sleep(opts.intervalMs ?? 5e3);
-    }
-  }
-  recommendations(runId) {
-    return this.call({
-      method: "GET",
-      path: `/api/runs/${encodeURIComponent(runId)}/recommendations`,
-      conflict: "The analysis isn't finished yet. Check again with `status --wait`.",
-      notFound: RUN_NOT_FOUND
-    });
-  }
-  feedback(runId, recId, body) {
-    return this.call({
-      method: "POST",
-      path: `/api/runs/${encodeURIComponent(runId)}/recommendations/${encodeURIComponent(recId)}/feedback`,
-      body,
-      conflict: "The analysis isn't finished yet, so there is nothing to rate."
-    });
-  }
-  setVisibility(runId, visibility) {
-    return this.call({
-      method: "POST",
-      path: `/api/runs/${encodeURIComponent(runId)}/visibility`,
-      body: { visibility },
-      notFound: RUN_NOT_FOUND
-    });
-  }
-  deleteMyData() {
-    return this.call({ method: "DELETE", path: "/api/me/data" });
-  }
-};
-async function errorDetail(res) {
-  const text = await res.text();
-  if (!res.headers.get("content-type")?.includes("application/json")) return text.slice(0, 200);
-  let detail;
-  try {
-    ({ detail } = JSON.parse(text));
-  } catch {
-    return text.slice(0, 200);
-  }
-  if (typeof detail === "string") return detail;
-  if (Array.isArray(detail)) {
-    return detail.map((d) => `${(d.loc ?? []).join(".")}: ${d.msg}`).join("; ");
-  }
-  return text.slice(0, 200);
-}
-function retryDelayMs(res, attempt, idempotent) {
-  const after = Number(res.headers.get("retry-after"));
-  if (res.status === 429 && Number.isFinite(after) && after > 0) {
-    const ms2 = after * 1e3;
-    return ms2 <= MAX_RETRY_WAIT_MS ? ms2 : void 0;
-  }
-  if (res.status === 503 || idempotent && (res.status === 502 || res.status === 504)) return 2e3 * 2 ** attempt;
-  return void 0;
-}
-function explain(res, detail, c) {
-  switch (res.status) {
-    case 401:
-      return `The server didn't accept this machine's token. Try again; if it keeps failing, report it at ${ISSUES_URL}.`;
-    case 404:
-      return c.notFound ?? sentence(detail || "Not found");
-    case 409:
-      return c.conflict ?? sentence(detail);
-    case 410:
-      return `${sentence(detail || "This run ended without a report")} Start a new analysis to get a report.`;
-    case 413:
-      return `${sentence(detail)} Use a shorter --days, or leave out large sessions with --exclude-session.`;
-    case 422:
-      if (/window/i.test(detail)) return `${sentence(detail)} Use a shorter --days.`;
-      if (/size does not match/i.test(detail)) return `${sentence(detail)} Run the command again.`;
-      return `The server rejected the request: ${sentence(detail)} Updating the CLI may fix this.`;
-    case 429: {
-      const after = Number(res.headers.get("retry-after"));
-      if (Number.isFinite(after) && after > 0) return `Too many requests. Wait ${after} seconds and try again.`;
-      return sentence(detail || "Too many requests. Wait a minute and try again");
-    }
-    default:
-      return `The server returned HTTP ${res.status}${detail ? `: ${sentence(detail)}` : "."} Try again in a few minutes.`;
-  }
-}
-
 // cli/src/auth.ts
-import { link, mkdir as mkdir2, open, readFile as readFile2, rename, rm, stat, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join2 } from "node:path";
 var SignInError = class extends Error {
-  constructor(message) {
+  constructor(message, reason = "failed") {
     super(message);
+    this.reason = reason;
     this.name = "SignInError";
   }
+  reason;
 };
 var CREDENTIALS = "credentials.json";
 var ACCESS = "access-token.json";
@@ -292,7 +70,7 @@ function isSignInPage(link2, domain) {
 }
 async function writePrivate(file, value) {
   const tmp = `${file}.${process.pid}.tmp`;
-  await writeFile2(tmp, `${JSON.stringify(value, null, 2)}
+  await writeFile(tmp, `${JSON.stringify(value, null, 2)}
 `, { mode: 384 });
   await rename(tmp, file);
 }
@@ -328,7 +106,7 @@ var Auth = class {
   now;
   access;
   file(name) {
-    return join2(this.opts.dir, name);
+    return join(this.opts.dir, name);
   }
   get login() {
     return this.opts.loginCommand ?? "revefi-agent-analyzer login";
@@ -336,14 +114,14 @@ var Auth = class {
   async readJson(name) {
     const file = this.file(name);
     try {
-      return JSON.parse(await readFile2(file, "utf8"));
+      return JSON.parse(await readFile(file, "utf8"));
     } catch (err) {
       if (isMissing(err)) return null;
       throw new SignInError(`${file} is damaged. Delete it and run \`${this.login}\` again.`);
     }
   }
   notSignedIn() {
-    return new SignInError(`You're not signed in to ${new URL(this.base).host}. Run \`${this.login}\` first.`);
+    return new SignInError(`You're not signed in to ${new URL(this.base).host}. Run \`${this.login}\` first.`, "signed_out");
   }
   /** Runs fn while holding this server's renewal lock, so two processes never renew at once. */
   async withLock(fn) {
@@ -453,7 +231,7 @@ var Auth = class {
       device_code: code.device_code,
       config
     };
-    await mkdir2(this.opts.dir, { recursive: true, mode: 448 });
+    await mkdir(this.opts.dir, { recursive: true, mode: 448 });
     await writePrivate(this.file(PENDING), pending);
     return pending;
   }
@@ -496,7 +274,10 @@ var Auth = class {
       const next = this.now() + interval * 1e3;
       if (next >= pending.expires_at) throw await this.expired();
       if (next > waitUntil) {
-        throw new SignInError(`Still waiting for you to approve the sign-in in your browser. Run \`${this.login} --wait\` once you have.`);
+        throw new SignInError(
+          `Still waiting for you to approve the sign-in in your browser. Run \`${this.login} --wait\` once you have.`,
+          "pending"
+        );
       }
       await this.sleep(interval * 1e3);
     }
@@ -529,7 +310,7 @@ var Auth = class {
     const fromDisk = await this.cachedAccess(rejected);
     if (fromDisk) return fromDisk;
     if (!await this.readJson(CREDENTIALS)) throw this.notSignedIn();
-    await mkdir2(this.opts.dir, { recursive: true, mode: 448 });
+    await mkdir(this.opts.dir, { recursive: true, mode: 448 });
     return this.withLock(async () => {
       const renewed = await this.cachedAccess(rejected);
       if (renewed) return renewed;
@@ -547,7 +328,7 @@ var Auth = class {
       if (body.error === "invalid_grant") {
         await rm(this.file(CREDENTIALS), { force: true });
         await rm(this.file(ACCESS), { force: true });
-        throw new SignInError(`Your sign-in to ${new URL(this.base).host} has expired. Run \`${this.login}\` again.`);
+        throw new SignInError(`Your sign-in to ${new URL(this.base).host} has expired. Run \`${this.login}\` again.`, "signed_out");
       }
       if (status === 429) throw new SignInError("Sign-in is busy. Wait a minute and try again.");
       throw new SignInError(`Couldn't renew your sign-in (HTTP ${status}). Try again in a few minutes.`);
@@ -577,10 +358,205 @@ var Auth = class {
   }
 };
 
+// cli/src/api.ts
+var DEFAULT_API = "https://analyzer.revefi.com";
+var ISSUES_URL = "https://github.com/revefi/agent-analyzer/issues";
+var FINAL_PHASES = ["done", "failed", "deferred"];
+var ApiError = class extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+    this.name = "ApiError";
+  }
+  status;
+};
+function configDir(env = process.env) {
+  const xdg = env.XDG_CONFIG_HOME && isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : void 0;
+  const base = xdg || process.platform === "win32" && env.APPDATA || join2(homedir(), ".config");
+  return join2(base, "revefi", "agent-analyzer");
+}
+var MAX_RETRY_WAIT_MS = 6e4;
+var CALL_TIMEOUT_MS = 3e4;
+var RUN_NOT_FOUND = "Run not found. Only the account that uploaded a run can manage it, and deleted runs are gone.";
+var sentence = (s3) => /[.!?]$/.test(s3.trim()) ? s3.trim() : `${s3.trim()}.`;
+var Client = class {
+  constructor(opts) {
+    this.opts = opts;
+    this.base = opts.base.replace(/\/+$/, "");
+    this.fetch = opts.fetch ?? globalThis.fetch;
+    this.sleep = opts.sleep ?? ((ms2) => new Promise((r) => setTimeout(r, ms2)));
+    this.env = opts.env ?? process.env;
+  }
+  opts;
+  fetch;
+  sleep;
+  env;
+  base;
+  /** Absolute URL for a server-relative link such as a run's `report_url`. */
+  link(path) {
+    return new URL(path, `${this.base}/`).toString();
+  }
+  /** Never echoes the URL or the raw error: an upload URL carries a signature. */
+  async send(url, init, host) {
+    try {
+      return await this.fetch(url, init);
+    } catch (err) {
+      throw new ApiError(unreachable(err, host, this.env));
+    }
+  }
+  /** `force` renews the token, only on the call straight after a 401; retries reuse the renewed one. */
+  async call(c, attempt = 0, refreshed = false, force = false) {
+    const headers = { "user-agent": this.opts.userAgent, accept: "application/json" };
+    if (c.body !== void 0) headers["content-type"] = "application/json";
+    headers.authorization = `Bearer ${await this.opts.token(force)}`;
+    const res = await this.send(
+      `${this.base}${c.path}`,
+      {
+        method: c.method,
+        headers,
+        body: c.body === void 0 ? void 0 : JSON.stringify(c.body),
+        signal: AbortSignal.timeout(CALL_TIMEOUT_MS)
+      },
+      new URL(this.base).host
+    );
+    if (res.ok) return res.status === 204 ? void 0 : await res.json();
+    const detail = await errorDetail(res);
+    const wait = retryDelayMs(res, attempt, c.idempotent !== false);
+    if (wait !== void 0 && attempt < 2) {
+      await this.sleep(wait);
+      return this.call(c, attempt + 1, refreshed);
+    }
+    if (res.status === 401) {
+      if (!refreshed) return this.call(c, attempt, true, true);
+      const login = this.opts.loginCommand ?? "revefi-agent-analyzer login";
+      throw new SignInError(`Your sign-in wasn't accepted. Run \`${login}\` again.`, "signed_out");
+    }
+    throw new ApiError(explain(res, detail, c), res.status);
+  }
+  createRun(manifest) {
+    return this.call({ method: "POST", path: "/api/runs", body: manifest, idempotent: false });
+  }
+  /** PUTs the archive to the presigned URL; the signed headers must be sent exactly as given. */
+  async upload(target, body) {
+    const declared = Object.entries(target.headers).find(([k2]) => k2.toLowerCase() === "content-length")?.[1];
+    if (declared !== void 0 && Number(declared) !== body.size) {
+      throw new ApiError("The archive changed after it was packed. Run the command again.");
+    }
+    const timeout = Math.max(12e4, body.size / 5e4 * 1e3);
+    const res = await this.send(
+      target.url,
+      { method: target.method ?? "PUT", headers: target.headers, body, signal: AbortSignal.timeout(timeout) },
+      "storage"
+    );
+    if (res.ok) return;
+    const code = (await res.text()).match(/<Code>([A-Za-z]{1,64})<\/Code>/)?.[1];
+    const expired = res.status === 403 && Date.parse(target.expires_at) < Date.now();
+    const next = expired ? "The upload link expired. Run the command again." : res.status === 403 ? `Update the CLI, and if that doesn't help, report it at ${ISSUES_URL}.` : "Run the command again.";
+    throw new ApiError(`Storage rejected the upload (HTTP ${res.status}${code ? `, ${code}` : ""}). ${next}`, res.status);
+  }
+  complete(runId) {
+    return this.call({
+      method: "POST",
+      path: `/api/runs/${encodeURIComponent(runId)}/complete`,
+      conflict: "The server didn't receive the upload. Run the command again.",
+      notFound: RUN_NOT_FOUND
+    });
+  }
+  status(runId) {
+    return this.call({ method: "GET", path: `/api/runs/${encodeURIComponent(runId)}`, notFound: RUN_NOT_FOUND });
+  }
+  async waitForRun(runId, opts) {
+    const deadline = Date.now() + opts.timeoutMs;
+    for (; ; ) {
+      const s3 = await this.status(runId);
+      opts.onProgress?.(s3);
+      if (FINAL_PHASES.includes(s3.phase) || Date.now() >= deadline) return s3;
+      await this.sleep(opts.intervalMs ?? 5e3);
+    }
+  }
+  recommendations(runId) {
+    return this.call({
+      method: "GET",
+      path: `/api/runs/${encodeURIComponent(runId)}/recommendations`,
+      conflict: "The analysis isn't finished yet. Check again with `status --wait`.",
+      notFound: RUN_NOT_FOUND
+    });
+  }
+  feedback(runId, recId, body) {
+    return this.call({
+      method: "POST",
+      path: `/api/runs/${encodeURIComponent(runId)}/recommendations/${encodeURIComponent(recId)}/feedback`,
+      body,
+      conflict: "The analysis isn't finished yet, so there is nothing to rate."
+    });
+  }
+  sharing(runId) {
+    return this.call({ method: "GET", path: `/api/runs/${encodeURIComponent(runId)}/sharing`, notFound: RUN_NOT_FOUND });
+  }
+  setSharing(runId, sharing) {
+    return this.call({
+      method: "PUT",
+      path: `/api/runs/${encodeURIComponent(runId)}/sharing`,
+      body: sharing,
+      notFound: RUN_NOT_FOUND
+    });
+  }
+  deleteMyData() {
+    return this.call({ method: "DELETE", path: "/api/me/data" });
+  }
+};
+async function errorDetail(res) {
+  const text = await res.text();
+  if (!res.headers.get("content-type")?.includes("application/json")) return text.slice(0, 200);
+  let detail;
+  try {
+    ({ detail } = JSON.parse(text));
+  } catch {
+    return text.slice(0, 200);
+  }
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail.map((d) => `${(d.loc ?? []).join(".")}: ${d.msg}`).join("; ");
+  }
+  return text.slice(0, 200);
+}
+function retryDelayMs(res, attempt, idempotent) {
+  const after = Number(res.headers.get("retry-after"));
+  if (res.status === 429 && Number.isFinite(after) && after > 0) {
+    const ms2 = after * 1e3;
+    return ms2 <= MAX_RETRY_WAIT_MS ? ms2 : void 0;
+  }
+  if (res.status === 503 || idempotent && (res.status === 502 || res.status === 504)) return 2e3 * 2 ** attempt;
+  return void 0;
+}
+function explain(res, detail, c) {
+  switch (res.status) {
+    case 404:
+      return c.notFound ?? sentence(detail || "Not found");
+    case 409:
+      return c.conflict ?? sentence(detail);
+    case 410:
+      return `${sentence(detail || "This run ended without a report")} Start a new analysis to get a report.`;
+    case 413:
+      return `${sentence(detail)} Use a shorter --days, or leave out large sessions with --exclude-session.`;
+    case 422:
+      if (/window/i.test(detail)) return `${sentence(detail)} Use a shorter --days.`;
+      if (/size does not match/i.test(detail)) return `${sentence(detail)} Run the command again.`;
+      return `The server rejected the request: ${sentence(detail)} Updating the CLI may fix this.`;
+    case 429: {
+      const after = Number(res.headers.get("retry-after"));
+      if (Number.isFinite(after) && after > 0) return `Too many requests. Wait ${after} seconds and try again.`;
+      return sentence(detail || "Too many requests. Wait a minute and try again");
+    }
+    default:
+      return `The server returned HTTP ${res.status}${detail ? `: ${sentence(detail)}` : "."} Try again in a few minutes.`;
+  }
+}
+
 // cli/src/commands.ts
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, openAsBlob } from "node:fs";
-import { readFile as readFile4, rm as rm3, writeFile as writeFile4 } from "node:fs/promises";
+import { readFile as readFile3, rm as rm3, writeFile as writeFile3 } from "node:fs/promises";
 import { homedir as homedir3 } from "node:os";
 import { basename, dirname as dirname2, join as join6, relative as relative2, resolve } from "node:path";
 import { createInterface as createInterface3 } from "node:readline/promises";
@@ -3670,7 +3646,7 @@ var To = (s3) => {
 
 // cli/src/preview.ts
 import { createReadStream as createReadStream2, createWriteStream } from "node:fs";
-import { mkdir as mkdir3, mkdtemp, readFile as readFile3, rm as rm2, writeFile as writeFile3 } from "node:fs/promises";
+import { mkdir as mkdir2, mkdtemp, readFile as readFile2, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
 import { dirname, join as join4 } from "node:path";
 import { createInterface as createInterface2 } from "node:readline";
 import { pipeline } from "node:stream/promises";
@@ -3997,15 +3973,15 @@ async function redactJsonlFile(src, dst, counts, home) {
   return bytes;
 }
 async function redactFile(src, dst, counts, home) {
-  await mkdir3(dirname(dst), { recursive: true, mode: 448 });
+  await mkdir2(dirname(dst), { recursive: true, mode: 448 });
   if (src.endsWith(".jsonl")) return redactJsonlFile(src, dst, counts, home);
-  const body = redactJson(await readFile3(src, "utf8"), counts, home);
-  await writeFile3(dst, body, { mode: 384 });
+  const body = redactJson(await readFile2(src, "utf8"), counts, home);
+  await writeFile2(dst, body, { mode: 384 });
   return Buffer.byteLength(body);
 }
 async function ensureIgnored(revefiDir) {
-  await mkdir3(revefiDir, { recursive: true, mode: 448 });
-  await writeFile3(join4(revefiDir, ".gitignore"), "*\n", { flag: "wx" }).catch(
+  await mkdir2(revefiDir, { recursive: true, mode: 448 });
+  await writeFile2(join4(revefiDir, ".gitignore"), "*\n", { flag: "wx" }).catch(
     (err) => {
       if (err.code !== "EEXIST") throw err;
     }
@@ -4041,7 +4017,7 @@ async function previewSession(dir, s3, opts) {
 async function writePreview(opts) {
   await ensureIgnored(opts.revefiDir);
   const base = join4(opts.revefiDir, "upload-preview");
-  await mkdir3(base, { recursive: true, mode: 448 });
+  await mkdir2(base, { recursive: true, mode: 448 });
   const stamp = (opts.now ?? /* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
   const dir = await mkdtemp(join4(base, `${stamp}-`));
   try {
@@ -4076,13 +4052,13 @@ async function writePreview(opts) {
       add(meta.counts, ps2.counts);
       meta.bytes += ps2.bytes;
     }
-    await writeFile3(
+    await writeFile2(
       join4(dir, PREVIEW_META),
       `${JSON.stringify(meta, null, 2)}
 `,
       { mode: 384 }
     );
-    await writeFile3(join4(dir, REPORT_FILE), renderReport(meta), {
+    await writeFile2(join4(dir, REPORT_FILE), renderReport(meta), {
       mode: 384
     });
     return { dir, meta };
@@ -4101,7 +4077,7 @@ async function readPreview(dir) {
   const file = join4(dir, PREVIEW_META);
   let text;
   try {
-    text = await readFile3(file, "utf8");
+    text = await readFile2(file, "utf8");
   } catch (err) {
     if (err.code !== "ENOENT") throw err;
     throw new PreviewError(`No preview at ${dir}. Previews are removed once uploaded; run \`prepare\` to make a new one.`);
@@ -4291,7 +4267,7 @@ function apiBase(e, api) {
   }
   return raw;
 }
-function machineDir(e, base) {
+function serverDir(e, base) {
   const root = e.configDir ?? configDir(e.env);
   const host = new URL(base).host;
   return host === new URL(DEFAULT_API).host ? root : join6(root, "servers", host.replace(/[^\w.-]/g, "_"));
@@ -4299,7 +4275,7 @@ function machineDir(e, base) {
 var loginCommand = (api) => `revefi-agent-analyzer login${api ? ` --api ${quote(api)}` : ""}`;
 function auth(e, api) {
   const base = apiBase(e, api);
-  return new Auth({ base, dir: machineDir(e, base), fetch: e.fetch, sleep: e.sleep, env: e.env, loginCommand: loginCommand(api) });
+  return new Auth({ base, dir: serverDir(e, base), fetch: e.fetch, sleep: e.sleep, env: e.env, loginCommand: loginCommand(api) });
 }
 function openInBrowser(url) {
   if (process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return;
@@ -4313,10 +4289,32 @@ function describeLogin(e, p2) {
   ${p2.verification_uri_complete}`);
   e.io.err(`Check that the page shows the code ${p2.user_code}, then approve it.`);
 }
-async function client(e, api) {
-  const base = apiBase(e, api);
-  const machineId = await loadMachineId(machineDir(e, base));
-  return new Client({ base, machineId, userAgent: `revefi-agent-analyzer/${e.version}`, fetch: e.fetch, sleep: e.sleep, env: e.env });
+function client(e, api, a = auth(e, api)) {
+  return new Client({
+    base: apiBase(e, api),
+    token: (force) => a.accessToken(force),
+    loginCommand: loginCommand(api),
+    userAgent: `revefi-agent-analyzer/${e.version}`,
+    fetch: e.fetch,
+    sleep: e.sleep,
+    env: e.env
+  });
+}
+async function signIn(e, a, openBrowser, timeoutMs) {
+  const pending = await a.startLogin();
+  describeLogin(e, pending);
+  if (openBrowser) (e.openUrl ?? openInBrowser)(pending.verification_uri_complete);
+  return (await a.finishLogin({ timeoutMs })).email;
+}
+async function ensureSignedIn(e, a) {
+  try {
+    await a.accessToken();
+    return;
+  } catch (err) {
+    if (!(err instanceof SignInError) || err.reason !== "signed_out" || !e.isTTY) throw err;
+  }
+  const email = await signIn(e, a, true);
+  e.io.err(email ? `Signed in as ${email}.` : "Signed in.");
 }
 function wholeNumber(raw, flag, fallback, min, max = Number.MAX_SAFE_INTEGER) {
   if (raw === void 0) return fallback;
@@ -4359,7 +4357,7 @@ function redactionLine(meta) {
 var UPLOAD_TO = "upload_to";
 async function checkHost(dir, base) {
   const file = join6(dir, UPLOAD_TO);
-  const recorded = existsSync(file) ? (await readFile4(file, "utf8")).trim() : "";
+  const recorded = existsSync(file) ? (await readFile3(file, "utf8")).trim() : "";
   const host = new URL(base).host;
   if (recorded && recorded !== host) {
     throw new UserError(`This preview was prepared for ${recorded}, not ${host}. Run \`prepare\` again for ${host}, or pass --api for ${recorded}.`);
@@ -4380,7 +4378,7 @@ async function prepareFrom(e, values) {
   const empty = limitProblem({ window, session_count: sessions.length, bytes: { compressed: 0, uncompressed: 0 } });
   if (empty) throw new UserError(empty);
   const { dir, meta } = await writePreview({ projectsDir, window, sessions, revefiDir: join6(root, ".revefi"), home: homedir3() });
-  await writeFile4(join6(dir, UPLOAD_TO), `${new URL(apiBase(e, values.api)).host}
+  await writeFile3(join6(dir, UPLOAD_TO), `${new URL(apiBase(e, values.api)).host}
 `, { mode: 384 });
   return { dir, meta, sourceBytes: sessions.reduce((a, s3) => a + s3.bytes, 0), scope: all ? "all projects on this machine" : root };
 }
@@ -4413,16 +4411,17 @@ function clientName(e) {
 function isPreviewFolder(dir) {
   return basename(dirname2(dir)) === "upload-preview" && basename(dirname2(dirname2(dir))) === ".revefi";
 }
-async function uploadPreview(e, dir, api) {
+async function uploadPreview(e, dir, api, a = auth(e, api)) {
   const meta = await readPreview(dir);
   await checkHost(dir, apiBase(e, api));
+  await ensureSignedIn(e, a);
   const archive = join6(dir, "upload.tar.gz");
   try {
     const packed = await pack(dir, meta, archive);
     const manifest = buildManifest(meta, packed, { name: clientName(e), version: e.version });
     const problem = limitProblem(manifest);
     if (problem) throw new UserError(problem);
-    const c = await client(e, api);
+    const c = client(e, api, a);
     e.io.err(`Uploading ${humanSize(packed.compressed)}...`);
     const run = await c.createRun(manifest);
     await c.upload(run.upload, await openAsBlob(archive));
@@ -4521,28 +4520,24 @@ var COMMANDS = {
       });
       if (values.start && values.wait) throw new UsageError("Use --start or --wait, not both.");
       const a = auth(e, values.api);
-      if (!values.wait) {
+      if (values.start) {
         const pending = await a.startLogin();
-        if (values.start) {
-          if (values.json) {
-            e.io.out(
-              JSON.stringify({
-                verification_uri_complete: pending.verification_uri_complete,
-                user_code: pending.user_code,
-                expires_in: Math.round((pending.expires_at - Date.now()) / 1e3)
-              })
-            );
-          } else {
-            describeLogin(e, pending);
-            e.io.err(`Then run: ${loginCommand(values.api)} --wait`);
-          }
-          return 0;
+        if (values.json) {
+          e.io.out(
+            JSON.stringify({
+              verification_uri_complete: pending.verification_uri_complete,
+              user_code: pending.user_code,
+              expires_in: Math.round((pending.expires_at - Date.now()) / 1e3)
+            })
+          );
+        } else {
+          describeLogin(e, pending);
+          e.io.err(`Then run: ${loginCommand(values.api)} --wait`);
         }
-        describeLogin(e, pending);
-        if (e.isTTY && !values["no-browser"]) (e.openUrl ?? openInBrowser)(pending.verification_uri_complete);
+        return 0;
       }
       const timeout = values.timeout === void 0 ? void 0 : wholeNumber(values.timeout, "--timeout", 0, 1) * 1e3;
-      const { email } = await a.finishLogin({ timeoutMs: timeout });
+      const email = values.wait ? (await a.finishLogin({ timeoutMs: timeout })).email : await signIn(e, a, e.isTTY && !values["no-browser"], timeout);
       if (values.json) e.io.out(JSON.stringify({ email }));
       else e.io.out(email ? `Signed in as ${email}.` : "Signed in.");
       return 0;
@@ -4574,10 +4569,12 @@ var COMMANDS = {
       const { values } = parse(args, { ...SCOPE_OPTIONS, ...API_OPTION, yes: { type: "boolean", short: "y" }, timeout: { type: "string" } });
       const timeout = wholeNumber(values.timeout, "--timeout", 30 * 60, 0);
       const api = apiBase(e, values.api);
+      const a = auth(e, values.api);
+      if (e.isTTY) await ensureSignedIn(e, a);
       const p2 = await prepareFrom(e, values);
       describePreview(e, p2, api);
       if (!await consent(e, values, p2.dir)) return 1;
-      return follow(e, await uploadPreview(e, p2.dir, values.api), timeout, false);
+      return follow(e, await uploadPreview(e, p2.dir, values.api, a), timeout, false);
     }
   },
   prepare: {
@@ -4637,7 +4634,7 @@ var COMMANDS = {
       const { values, positionals } = parse(args, { ...API_OPTION, wait: { type: "boolean" }, json: { type: "boolean" }, timeout: { type: "string" } }, 1);
       const timeout = wholeNumber(values.timeout, "--timeout", 480, 0);
       const runId = positionals[0] ?? "";
-      const c = await client(e, values.api);
+      const c = client(e, values.api);
       const s3 = await c.status(runId);
       const reportUrl = c.link(s3.report_url);
       if (values.wait) return follow(e, { c, runId, reportUrl }, timeout, Boolean(values.json));
@@ -4649,7 +4646,7 @@ var COMMANDS = {
     summary: "Print a finished run's recommendations (--json for the full list)",
     async run(args, e) {
       const { values, positionals } = parse(args, { ...API_OPTION, json: { type: "boolean" } }, 1);
-      const recs = await (await client(e, values.api)).recommendations(positionals[0] ?? "");
+      const recs = await client(e, values.api).recommendations(positionals[0] ?? "");
       if (values.json) e.io.out(JSON.stringify(recs));
       else printSummary(e, recs);
       return 0;
@@ -4662,44 +4659,63 @@ var COMMANDS = {
       const [runId = "", recId = "", verdict = ""] = positionals;
       if (verdict !== "up" && verdict !== "down") throw new UsageError("The rating must be up or down.");
       const pr2 = values["applied-pr"];
-      await (await client(e, values.api)).feedback(runId, recId, pr2 ? { verdict, source: "skill", applied_pr_url: pr2 } : { verdict, source: "user" });
+      await client(e, values.api).feedback(runId, recId, pr2 ? { verdict, source: "skill", applied_pr_url: pr2 } : { verdict, source: "user" });
       e.io.out(pr2 ? "Recorded the applied fix. Thanks." : "Thanks, your rating was recorded.");
       return 0;
     }
   },
   share: {
-    summary: "Set who can open a run's report: share <run> private|link",
+    summary: "Show or change who can open a run's report: share <run> [--add EMAIL] [--remove EMAIL] [--link on|off]",
     async run(args, e) {
-      const { values, positionals } = parse(args, API_OPTION, 2);
-      const [runId = "", who = ""] = positionals;
-      if (who !== "private" && who !== "link") throw new UsageError("Choose private (only you) or link (anyone with the link).");
-      const c = await client(e, values.api);
-      await c.setVisibility(runId, who);
-      const s3 = await c.status(runId);
-      e.io.out(who === "link" ? `Anyone with the link can now open the report: ${c.link(s3.report_url)}` : "The report is now private to this machine.");
+      const { values, positionals } = parse(
+        args,
+        { ...API_OPTION, add: { type: "string", multiple: true }, remove: { type: "string", multiple: true }, link: { type: "string" }, json: { type: "boolean" } },
+        1
+      );
+      const runId = positionals[0] ?? "";
+      if (values.link !== void 0 && values.link !== "on" && values.link !== "off") {
+        throw new UsageError("--link must be on (anyone signed in with the link) or off.");
+      }
+      const add2 = (values.add ?? []).map((email) => email.trim().toLowerCase());
+      const bad = add2.find((email) => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email));
+      if (bad) throw new UsageError(`${bad} isn't an email address.`);
+      const c = client(e, values.api);
+      let sharing = await c.sharing(runId);
+      const remove = new Set((values.remove ?? []).map((email) => email.trim().toLowerCase()));
+      const next = {
+        link: values.link === void 0 ? sharing.link : values.link === "on",
+        emails: [.../* @__PURE__ */ new Set([...sharing.emails, ...add2])].filter((email) => !remove.has(email))
+      };
+      if (add2.length || remove.size || values.link !== void 0) sharing = await c.setSharing(runId, next);
+      const { report_url } = await c.status(runId);
+      if (values.json) {
+        e.io.out(JSON.stringify({ ...sharing, report_url: c.link(report_url) }));
+        return 0;
+      }
+      e.io.out(sharing.emails.length ? `Shared with: ${sharing.emails.join(", ")}` : "Not shared with anyone by email.");
+      e.io.out(sharing.link ? "Anyone signed in who has the link can open it." : "The link alone doesn't give access.");
+      e.io.out(`Report: ${c.link(report_url)}`);
       return 0;
     }
   },
   "delete-my-data": {
-    summary: "Delete every run, upload and report made from this machine",
+    summary: "Delete every run, upload and report made with your account",
     async run(args, e) {
       const { values } = parse(args, { ...API_OPTION, yes: { type: "boolean", short: "y" } });
-      if (!existsSync(join6(machineDir(e, apiBase(e, values.api)), "machine-id"))) {
-        e.io.out("Nothing to delete: nothing has been uploaded from this machine.");
-        return 0;
-      }
+      const a = auth(e, values.api);
+      const email = await a.email() ?? "your account";
       if (!values.yes) {
         if (!e.isTTY) {
-          e.io.err("Nothing was deleted. Run again with --yes to delete every run, upload and report from this machine.");
+          e.io.err(`Nothing was deleted. Run again with --yes to delete every run, upload and report made with ${email}.`);
           return 1;
         }
-        if (!await e.ask("Delete every run, upload and report from this machine? This can't be undone. [y/N] ")) {
+        if (!await e.ask(`Delete every run, upload and report made with ${email}? This can't be undone. [y/N] `)) {
           e.io.err("Nothing was deleted.");
           return 1;
         }
       }
-      await (await client(e, values.api)).deleteMyData();
-      e.io.out("Deleted every run, upload and report from this machine. Local previews in .revefi/ are untouched.");
+      await client(e, values.api, a).deleteMyData();
+      e.io.out(`Deleted every run, upload and report made with ${email}. Local previews in .revefi/ are untouched.`);
       return 0;
     }
   }
@@ -4765,9 +4781,10 @@ function defaultEnv(io2 = consoleIo) {
     ask: askYesNo
   };
 }
+var SIGN_IN_KINDS = { signed_out: "sign_in", pending: "sign_in_pending", failed: "sign_in_failed" };
 function classify(err, debug) {
   if (err instanceof UsageError) return { kind: "usage", message: err.message };
-  if (err instanceof SignInError) return { kind: "sign_in", message: err.message };
+  if (err instanceof SignInError) return { kind: SIGN_IN_KINDS[err.reason], message: err.message };
   if (err instanceof ApiError) return { kind: "server", message: err.message, status: err.status };
   if (err instanceof UserError || err instanceof PreviewError) return { kind: "refused", message: err.message };
   const e = err;
