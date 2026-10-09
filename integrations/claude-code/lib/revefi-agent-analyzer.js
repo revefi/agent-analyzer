@@ -3651,6 +3651,209 @@ import { dirname, join as join4 } from "node:path";
 import { createInterface as createInterface2 } from "node:readline";
 import { pipeline } from "node:stream/promises";
 
+// cli/src/pii.ts
+import { isIPv4, isIPv6 } from "node:net";
+var digitsOf = (s3) => s3.replace(/\D/g, "");
+function validateLuhn(value) {
+  const digits = digitsOf(value);
+  let sum = 0;
+  for (let i = 0; i < digits.length; i++) {
+    const d = Number(digits[digits.length - 1 - i]);
+    sum += i % 2 ? d * 2 > 9 ? d * 2 - 9 : d * 2 : d;
+  }
+  return digits.length > 0 && sum % 10 === 0;
+}
+var IBAN_LENGTHS = {
+  AD: 24,
+  AE: 23,
+  AL: 28,
+  AT: 20,
+  AZ: 28,
+  BA: 20,
+  BE: 16,
+  BG: 22,
+  BH: 22,
+  BI: 27,
+  BR: 29,
+  BY: 28,
+  CH: 21,
+  CR: 21,
+  CY: 28,
+  CZ: 24,
+  DE: 22,
+  DJ: 27,
+  DK: 18,
+  DO: 28,
+  EE: 20,
+  EG: 29,
+  ES: 24,
+  FI: 18,
+  FK: 18,
+  FO: 18,
+  FR: 27,
+  GB: 22,
+  GE: 22,
+  GI: 23,
+  GL: 18,
+  GR: 27,
+  GT: 28,
+  HN: 28,
+  HR: 21,
+  HU: 28,
+  IE: 22,
+  IL: 23,
+  IQ: 23,
+  IS: 26,
+  IT: 27,
+  JO: 30,
+  KW: 30,
+  KZ: 20,
+  LB: 28,
+  LC: 32,
+  LI: 21,
+  LT: 20,
+  LU: 20,
+  LV: 21,
+  LY: 25,
+  MC: 27,
+  MD: 24,
+  ME: 22,
+  MK: 19,
+  MN: 20,
+  MR: 27,
+  MT: 31,
+  MU: 30,
+  NI: 28,
+  NL: 18,
+  NO: 15,
+  OM: 23,
+  PK: 24,
+  PL: 28,
+  PS: 29,
+  PT: 25,
+  QA: 29,
+  RO: 24,
+  RS: 22,
+  RU: 33,
+  SA: 24,
+  SC: 31,
+  SD: 18,
+  SE: 24,
+  SI: 19,
+  SK: 24,
+  SM: 27,
+  SO: 23,
+  ST: 25,
+  SV: 28,
+  TL: 23,
+  TN: 24,
+  TR: 26,
+  UA: 29,
+  VA: 22,
+  VG: 24,
+  XK: 20,
+  YE: 30
+};
+function validateIBAN(value) {
+  const iban = value.replace(/[\s.-]/g, "").toUpperCase();
+  if (IBAN_LENGTHS[iban.slice(0, 2)] !== iban.length || !/^[A-Z]{2}\d{2}[A-Z0-9]+$/.test(iban)) return false;
+  const n = `${iban.slice(4)}${iban.slice(0, 4)}`.replace(/[A-Z]/g, (c) => String(c.charCodeAt(0) - 55));
+  return BigInt(n) % 97n === 1n;
+}
+function validateSSN(value) {
+  const d = digitsOf(value);
+  const area = Number(d.slice(0, 3));
+  return d.length === 9 && area !== 0 && area !== 666 && area < 900 && d.slice(3, 5) !== "00" && d.slice(5) !== "0000";
+}
+function validateNINO(value) {
+  const nino = value.replace(/\s/g, "").toUpperCase();
+  return /^[A-CEGHJ-PR-TW-Z][A-CEGHJ-NPR-TW-Z]\d{6}[A-D]$/.test(nino) && !/^(?:BG|GB|NK|KN|TN|NT|ZZ)/.test(nino);
+}
+function personalIPv4(ip) {
+  if (!isIPv4(ip)) return false;
+  const [a = 0, b2 = 0, c = 0, d = 0] = ip.split(".").map(Number);
+  if (a < 10 && b2 < 10 && c < 10 && d < 10) return false;
+  return !(a === 0 || a === 10 || a === 127 || a >= 224 || a === 169 && b2 === 254 || a === 172 && b2 >= 16 && b2 <= 31 || a === 192 && b2 === 168);
+}
+function personalIPv6(ip) {
+  return isIPv6(ip) && /^[23][\da-f]{3}:/i.test(ip);
+}
+var PII_RULES = [
+  {
+    id: "email",
+    re: /(?<![\p{L}\p{N}_.%+])[\p{L}\p{N}_][\p{L}\p{N}_.%+'-]{0,63}(?:@|%40)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?){0,8}\.[A-Za-z]{2,24}/gu,
+    placeholder: "<EMAIL>",
+    // `git@host` is a git remote, not a person's address.
+    valid: (m2) => !/^git(?:@|%40)/i.test(m2)
+  },
+  {
+    id: "card-number",
+    re: /(?<![\w.-])(?:[2-6]\d{3}([ .-]?)\d{4}\1\d{4}\1\d{1,7}|3[47]\d{2}([ .-]?)\d{6}\2\d{5})(?![\w-]|\.\d)/g,
+    placeholder: "<CARD_NUMBER>",
+    valid: (m2) => digitsOf(m2).length >= 13 && validateLuhn(m2)
+  },
+  {
+    id: "iban",
+    re: /(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?(?![A-Za-z0-9])/gi,
+    placeholder: "<IBAN>",
+    valid: validateIBAN,
+    shrink: / ?[A-Z0-9]{1,4}$/i
+  },
+  {
+    id: "ssn",
+    re: /(?<![\w-])\d{3}([ -])\d{2}\1\d{4}(?![\w-])/g,
+    placeholder: "<SSN>",
+    valid: validateSSN
+  },
+  {
+    id: "national-id",
+    re: /(?<![A-Za-z0-9])[A-Z]{2} ?\d{2} ?\d{2} ?\d{2} ?[A-D](?![A-Za-z0-9])/g,
+    placeholder: "<NATIONAL_ID>",
+    valid: validateNINO
+  },
+  {
+    id: "national-id",
+    re: /(?<![\w-])\d{3}([ -])\d{3}\1\d{3}(?![\w-])/g,
+    placeholder: "<NATIONAL_ID>",
+    valid: (m2) => digitsOf(m2) !== "000000000" && validateLuhn(m2)
+  },
+  {
+    id: "ip-address",
+    re: /(?<![\w.])\d{1,3}(?:\.\d{1,3}){3}(?!\w|\.\d)/g,
+    placeholder: "<IP_ADDRESS>",
+    valid: personalIPv4
+  },
+  {
+    id: "ip-address",
+    re: /(?<![\w:.])(?=[\dA-Fa-f:]{0,39}\d)[\dA-Fa-f]{0,4}(?::[\dA-Fa-f]{0,4}){2,7}(?![\w:])/g,
+    placeholder: "<IP_ADDRESS>",
+    valid: personalIPv6
+  },
+  {
+    // Written like a phone number: with a `+` country code, `(415) 555-0132`, `415-555-0132` or
+    // `415 555 0132`. A bare run of digits is an ID or a timestamp far more often.
+    id: "phone",
+    re: /(?<![\w+/.-])(?:\+\d{10,14}|\+\d{1,3}[ .-]?(?:\(\d{1,4}\)[ .-]?)?\d{1,5}(?:[ .-]\d{2,8}){1,4}|(?:1[ .-])?(?:\(\d{3}\)[ .-]?\d{3}[ .-]\d{4}|\d{3}([ .-])\d{3}\1\d{4}))(?![\w-]|\.\d)/g,
+    placeholder: "<PHONE>"
+  }
+];
+function scrubPersonalData(text, counts) {
+  let s3 = text;
+  for (const rule of PII_RULES) {
+    s3 = s3.replace(rule.re, (m2) => {
+      let v2 = m2;
+      while (rule.valid && !rule.valid(v2)) {
+        const shorter = rule.shrink ? v2.replace(rule.shrink, "") : v2;
+        if (shorter === v2) return m2;
+        v2 = shorter;
+      }
+      counts[rule.id] = (counts[rule.id] ?? 0) + 1;
+      return rule.placeholder + m2.slice(v2.length);
+    });
+  }
+  return s3;
+}
+
 // cli/src/redact.ts
 var fixed = (s3) => () => s3;
 var keep1 = (s3) => (g2) => `${g2[1] ?? ""}${s3}`;
@@ -3847,6 +4050,7 @@ function scrubText(text, counts, home, envFile = false) {
   );
   for (const rule of RULES)
     s3 = replaceCounting(s3, rule.re, rule.to, counts, rule.id);
+  s3 = scrubPersonalData(s3, counts);
   return home ? rewriteHome(s3, home, counts) : s3;
 }
 function normalHome(home) {
@@ -4114,6 +4318,13 @@ var RULE_LABELS = {
   "base64-blob": "Long base64 blobs",
   image: "Images",
   "original-file": "Full copies of edited files",
+  email: "Email addresses",
+  phone: "Phone numbers",
+  "card-number": "Payment card numbers",
+  iban: "Bank account numbers (IBAN)",
+  ssn: "US Social Security numbers",
+  "national-id": "UK National Insurance and Canadian SIN numbers",
+  "ip-address": "IP addresses outside private ranges",
   "home-path": "Your home folder path (shown as ~)",
   "unparsable-line": "Incomplete lines (dropped)",
   "unparsable-file": "Unreadable metadata files (emptied)"
@@ -4345,14 +4556,21 @@ var COUNT_LABELS = {
   "secret-assignment": ["named secret", "named secrets"],
   "secret-key": ["secret field", "secret fields"],
   "env-file": [".env file", ".env files"],
-  image: ["image", "images"]
+  image: ["image", "images"],
+  email: ["email address", "email addresses"],
+  phone: ["phone number", "phone numbers"],
+  "card-number": ["card number", "card numbers"],
+  iban: ["IBAN", "IBANs"],
+  ssn: ["Social Security number", "Social Security numbers"],
+  "national-id": ["national ID number", "national ID numbers"],
+  "ip-address": ["IP address", "IP addresses"]
 };
 function redactionLine(meta) {
   const named = Object.entries(meta.counts).filter(([id]) => COUNT_LABELS[id]);
   const other = Object.entries(meta.counts).filter(([id]) => !COUNT_LABELS[id] && id !== "home-path" && !id.startsWith("unparsable")).reduce((a, [, n]) => a + n, 0);
   const parts = named.sort(([, a], [, b2]) => b2 - a).map(([id, n]) => `${n} ${COUNT_LABELS[id]?.[n === 1 ? 0 : 1]}`);
   if (other) parts.push(`${other} other secret${other === 1 ? "" : "s"} or blobs`);
-  return parts.length ? `Removed: ${parts.join(", ")}` : "No known secret formats found.";
+  return parts.length ? `Removed: ${parts.join(", ")}` : "No known secrets or personal data found.";
 }
 var UPLOAD_TO = "upload_to";
 async function checkHost(dir, base) {

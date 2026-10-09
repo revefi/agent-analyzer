@@ -7,6 +7,7 @@
  */
 
 import { encodeProjectDir } from "./collect.js";
+import { scrubPersonalData } from "./pii.js";
 
 export type Counts = Record<string, number>;
 
@@ -238,6 +239,7 @@ export function scrubText(
   );
   for (const rule of RULES)
     s = replaceCounting(s, rule.re, rule.to, counts, rule.id);
+  s = scrubPersonalData(s, counts);
   return home ? rewriteHome(s, home, counts) : s;
 }
 

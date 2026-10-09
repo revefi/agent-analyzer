@@ -73,7 +73,8 @@ Tell the user, in a few lines:
 - the scope (`scope`), how many sessions, from which dates, and the size before and after
   redaction;
 - that the upload contains their prompts, Claude's replies, code and command output, with known
-  secret formats removed (list what `redactions` found, in plain words);
+  secrets and personal data removed (list what `redactions` found, in plain words), and that
+  names and street addresses are not removed;
 - that `REDACTION_REPORT.md` in `preview_dir` lists exactly what would be sent;
 - if `upload_to` is not `analyzer.revefi.com`, say plainly that this is a different server and
   where that setting can come from (the `REVEFI_ANALYZER_API` environment variable or `--api`).

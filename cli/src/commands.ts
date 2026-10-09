@@ -204,6 +204,13 @@ const COUNT_LABELS: Record<string, [string, string]> = {
   "secret-key": ["secret field", "secret fields"],
   "env-file": [".env file", ".env files"],
   image: ["image", "images"],
+  email: ["email address", "email addresses"],
+  phone: ["phone number", "phone numbers"],
+  "card-number": ["card number", "card numbers"],
+  iban: ["IBAN", "IBANs"],
+  ssn: ["Social Security number", "Social Security numbers"],
+  "national-id": ["national ID number", "national ID numbers"],
+  "ip-address": ["IP address", "IP addresses"],
 };
 
 function redactionLine(meta: PreviewMeta): string {
@@ -213,7 +220,7 @@ function redactionLine(meta: PreviewMeta): string {
     .reduce((a, [, n]) => a + n, 0);
   const parts = named.sort(([, a], [, b]) => b - a).map(([id, n]) => `${n} ${COUNT_LABELS[id]?.[n === 1 ? 0 : 1]}`);
   if (other) parts.push(`${other} other secret${other === 1 ? "" : "s"} or blobs`);
-  return parts.length ? `Removed: ${parts.join(", ")}` : "No known secret formats found.";
+  return parts.length ? `Removed: ${parts.join(", ")}` : "No known secrets or personal data found.";
 }
 
 interface Prepared {

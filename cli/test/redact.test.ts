@@ -182,10 +182,118 @@ describe("scrubText: more secret shapes", () => {
     ["token=", "token=".repeat(160_000)],
     ["scheme://", `${"http://a:".repeat(100_000)}`],
     ["mysql", `mysql ${"x ".repeat(500_000)}`],
+    ["dotted numbers", "1.".repeat(500_000)],
+    ["spaced digits", "1 ".repeat(500_000)],
+    ["hex and colons", "a1:".repeat(330_000)],
+    ["local parts and @", "a.b@".repeat(250_000)],
+    ["domain labels", `a@${"b1.".repeat(330_000)}`],
+    ["IBAN groups", `GB82 ${"AB12 ".repeat(200_000)}`],
+    ["phone groups", `+1 ${"12 ".repeat(330_000)}`],
+    ["dashed and quoted words", "a-b'".repeat(250_000)],
   ])("stays fast on a megabyte of %s", (label, input) => {
     const t0 = performance.now();
     scrubText(input, {}, "/Users/pat", true);
     expect(performance.now() - t0, label).toBeLessThan(1500);
+  });
+});
+
+describe("scrubText: personal data", () => {
+  it.each([
+    [
+      "email",
+      "send the test log to jane.doe@corp.io",
+      "send the test log to <EMAIL>",
+    ],
+    [
+      "email",
+      "replace the placeholder with jane.doe@corp.io",
+      "replace the placeholder with <EMAIL>",
+    ],
+    [
+      "email",
+      "# userEmail\nThe address is jane@corp.io. Use it",
+      "# userEmail\nThe address is <EMAIL>. Use it",
+    ],
+    ["email", "old: jane@corp.io_old", "old: <EMAIL>_old"],
+    ["phone", "call +1 (415) 555-0132.", "call <PHONE>."],
+    [
+      "phone",
+      "call 415-555-0132, (415) 555-0199 or 415 555 0100",
+      "call <PHONE>, <PHONE> or <PHONE>",
+    ],
+    ["phone", "call 1-415-555-0132", "call <PHONE>"],
+    [
+      "phone",
+      "UK +44 20 7946 0958, FR +33 1 23 45 67 89",
+      "UK <PHONE>, FR <PHONE>",
+    ],
+    [
+      "card-number",
+      "card 4111 1111 1111 1111 on file",
+      "card <CARD_NUMBER> on file",
+    ],
+    ["card-number", "card 4111-1111-1111-1111", "card <CARD_NUMBER>"],
+    ["iban", "IBAN GB82WEST12345698765432 to pay", "IBAN <IBAN> to pay"],
+    ["iban", "IBAN GB82 WEST 1234 5698 7654 32 IS MINE", "IBAN <IBAN> IS MINE"],
+    ["iban", "ES91 2100 0418 4502 0005 1332 TO PAY", "<IBAN> TO PAY"],
+    ["iban", "BE68 5390 0754 7034 FROM me, gb82west12345698765432", "<IBAN> FROM me, <IBAN>"],
+    ["card-number", "card 4111 1111 1111 1111 12/27 cvv 123, 4111111111111111 123", "card <CARD_NUMBER> 12/27 cvv 123, <CARD_NUMBER> 123"],
+    ["card-number", "amex 3782 822463 10005 or 4111.1111.1111.1111", "amex <CARD_NUMBER> or <CARD_NUMBER>"],
+    ["ssn", "SSN 123 45 6789", "SSN <SSN>"],
+    ["phone", "DE +49 89 12345678 and +49 30 901820", "DE <PHONE> and <PHONE>"],
+    ["email", "?u=jane%40corp.io and _jane@corp.io", "?u=<EMAIL> and <EMAIL>"],
+    ["ssn", "the number is 123-45-6789", "the number is <SSN>"],
+    [
+      "national-id",
+      "NI AB 12 34 56 C, SIN 046-454-286",
+      "NI <NATIONAL_ID>, SIN <NATIONAL_ID>",
+    ],
+    ["iban", "IBAN BE68 5390 0754 7034 from your main bank", "IBAN <IBAN> from your main bank"],
+    ["email", "mail o'brien@corp.io, jöran@corp.de or -jane@corp.io", "mail <EMAIL>, <EMAIL> or -<EMAIL>"],
+    [
+      "ip-address",
+      "client 52.14.200.1 connected",
+      "client <IP_ADDRESS> connected",
+    ],
+    [
+      "ip-address",
+      "from 2001:db8:85a3::8a2e:370:7334 and 2600:9000:24d9:4800:7:29a6:f140:93a1",
+      "from <IP_ADDRESS> and <IP_ADDRESS>",
+    ],
+  ])("%s: %s", (id, input, output) => {
+    const r = scrub(input);
+    expect(r.text).toBe(output);
+    expect(r.counts[id]).toBeGreaterThan(0);
+  });
+
+  it("leaves code, versions, IDs and infrastructure addresses alone", () => {
+    const text = [
+      "pnpm add typescript@7.0.2 vitest@5.0.3",
+      "git clone git@github.com:org/repo.git",
+      "id 60701899-2693-4533-a1b2-c3d4e5f6a7b8, sha 98025da, uuid be72-e9da7b9c9972",
+      "max 2147483648, ts 1728475200000, date 2026-10-09, at 12:30:45, took 12.5-13.5s",
+      "@@ -12,7 +12,8 @@ const userName = getUser(req); let x: f64::consts::PI; u8::MAX",
+      "- [4.3.2.1. Property](#p) in v1.2.3.4, then 4.3.12.10.2.",
+      "hosts 10.0.4.12, 172.31.0.5, 192.168.1.1, 127.0.0.1, ::1, fe80::1ff:fe23:4567:890a",
+      "a[1::2], s[2::], B2::C, dead:beef::1, git@ssh.dev.azure.com:v3/org/repo",
+    ].join("\n");
+    expect(scrub(text)).toEqual({ text, counts: {} });
+  });
+
+  it("leaves numbers that fail the checksum", () => {
+    const text =
+      "order 4111 1111 1111 1112, IBAN GB00WEST12345698765432, SSN 000-12-3456";
+    expect(scrub(text)).toEqual({ text, counts: {} });
+  });
+
+  it("redacts every match in a long tool output", () => {
+    const text = [...Array(20_000).keys()]
+      .map((i) => `user${i}@corp.io 52.14.200.${i % 250}`)
+      .join("\n");
+    const r = scrub(text);
+    expect(r.counts.email).toBe(20_000);
+    expect(r.counts["ip-address"]).toBe(20_000);
+    expect(r.text).not.toMatch(/@corp\.io|52\.14/);
   });
 });
 
