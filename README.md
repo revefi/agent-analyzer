@@ -19,7 +19,7 @@ you before each one.
 
 Then, in any repository, run `/revefi:analyze`. You can say what to include, for example
 `/revefi:analyze last 3 days` or `/revefi:analyze all projects`. The first time, it asks you to
-sign in with Google.
+sign in with Google or an emailed code.
 
 The plugin runs the CLI with your installed Node.js, version 22.12 or newer. Plugins that ship
 executables are not installed by claude.ai or Cowork; use Claude Code in a terminal or an IDE.
@@ -104,18 +104,19 @@ revefi-agent-analyzer delete-my-data
 | `feedback <run> <rec> up\|down` | Rate a recommendation |
 | `share <run>` | Show who can open a report; `--add EMAIL`, `--remove EMAIL` and `--link on\|off` change it |
 | `delete-my-data` | Delete every run, upload and report made with your account |
-| `login` / `logout` / `whoami` | Sign in with Google, sign out, or show who you're signed in as |
+| `login` / `logout` / `whoami` | Sign in (Google or an emailed code), sign out, or show who you're signed in as |
 
 Common options: `--days N` (1 to 7), `--all-projects`, `--exclude-session ID`, `--yes` (don't
 ask), `--json`. Run `revefi-agent-analyzer --help` for all of them.
 
 ### Signing in
 
-You sign in with Google; the first sign-in creates your account. `revefi-agent-analyzer login`
+You sign in with Google or an emailed code; the first sign-in creates your
+account, and both ways open the same account for the same email. `revefi-agent-analyzer login`
 shows a link and a short code, and in a terminal opens your browser (`--no-browser` skips that):
-check that the page shows the same code, then continue with Google. `analyze` in a terminal does
-this for you the first time. In a script, run `login --start --json` to get the link and code,
-then `login --wait`.
+check that the page shows the same code, then continue with Google or an emailed code.
+`analyze` in a terminal does this for you the first time. In a script, run
+`login --start --json` to get the link and code, then `login --wait`.
 
 The CLI keeps a refresh token and the current access token in
 `~/.config/revefi/agent-analyzer/` (`%APPDATA%\revefi\agent-analyzer\` on Windows), never the
@@ -126,7 +127,7 @@ the sign-in. Each server you point the CLI at with `--api` gets its own sign-in.
 ### Sharing a report
 
 A report is private: only you can open it. `share <run> --add someone@company.com` lets that
-person open it once they sign in with that Google email, and `share <run> --link on` lets anyone
+person open it once they sign in with that email, and `share <run> --link on` lets anyone
 signed in who has the link open it. The report page has the same controls.
 
 ### Scripting
