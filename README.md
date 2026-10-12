@@ -18,7 +18,8 @@ you before each one.
 ```
 
 Then, in any repository, run `/revefi:analyze`. You can say what to include, for example
-`/revefi:analyze last 3 days` or `/revefi:analyze all projects`.
+`/revefi:analyze last 3 days` or `/revefi:analyze all projects`. The first time, it asks you to
+sign in with Google.
 
 The plugin runs the CLI with your installed Node.js, version 22.12 or newer. Plugins that ship
 executables are not installed by claude.ai or Cowork; use Claude Code in a terminal or an IDE.
@@ -85,7 +86,7 @@ Redaction recognises known formats; it cannot catch every kind of sensitive text
 preview if a session touched something you would not share, and leave sessions out with
 `--exclude-session <id>`.
 
-To remove everything you have uploaded from this machine, at any time:
+To remove everything you have uploaded with your account, at any time:
 
 ```bash
 revefi-agent-analyzer delete-my-data
@@ -101,18 +102,32 @@ revefi-agent-analyzer delete-my-data
 | `status <run>` | Show a run's progress; `--wait` follows it to the end |
 | `recommendations <run>` | Print the recommendations of a finished run |
 | `feedback <run> <rec> up\|down` | Rate a recommendation |
-| `share <run> private\|link` | Make a report private, or readable by anyone with its link |
-| `delete-my-data` | Delete every run, upload and report made from this machine |
+| `share <run>` | Show who can open a report; `--add EMAIL`, `--remove EMAIL` and `--link on\|off` change it |
+| `delete-my-data` | Delete every run, upload and report made with your account |
+| `login` / `logout` / `whoami` | Sign in with Google, sign out, or show who you're signed in as |
 
 Common options: `--days N` (1 to 7), `--all-projects`, `--exclude-session ID`, `--yes` (don't
 ask), `--json`. Run `revefi-agent-analyzer --help` for all of them.
 
-### This machine's id
+### Signing in
 
-There is no account to sign in to yet. The first upload creates a random id for this machine in
-`~/.config/revefi/agent-analyzer/machine-id` (owner-only). It is what lets you check, share and
-delete your runs, so keep it: if you delete that file you lose access to the runs made so far.
-Run `delete-my-data` first if you want them gone.
+You sign in with Google; the first sign-in creates your account. `revefi-agent-analyzer login`
+shows a link and a short code, and in a terminal opens your browser (`--no-browser` skips that):
+check that the page shows the same code, then continue with Google. `analyze` in a terminal does
+this for you the first time. In a script, run `login --start --json` to get the link and code,
+then `login --wait`.
+
+The CLI keeps a refresh token and the current access token in
+`~/.config/revefi/agent-analyzer/` (`%APPDATA%\revefi\agent-analyzer\` on Windows), never the
+transcripts. On macOS and Linux the files are readable only by you; on Windows they rely on your
+user folder's permissions. `logout` removes them and, when the server can be reached, revokes
+the sign-in. Each server you point the CLI at with `--api` gets its own sign-in.
+
+### Sharing a report
+
+A report is private: only you can open it. `share <run> --add someone@company.com` lets that
+person open it once they sign in with that Google email, and `share <run> --link on` lets anyone
+signed in who has the link open it. The report page has the same controls.
 
 ### Scripting
 
