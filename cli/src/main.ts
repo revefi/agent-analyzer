@@ -61,11 +61,13 @@ export function defaultEnv(io: Io = consoleIo): Env {
   };
 }
 
-type ErrorKind = "usage" | "sign_in" | "refused" | "server" | "unexpected";
+type ErrorKind = "usage" | "sign_in" | "sign_in_pending" | "sign_in_failed" | "refused" | "server" | "unexpected";
+
+const SIGN_IN_KINDS = { signed_out: "sign_in", pending: "sign_in_pending", failed: "sign_in_failed" } as const;
 
 function classify(err: unknown, debug: boolean): { kind: ErrorKind; message: string; status?: number } {
   if (err instanceof UsageError) return { kind: "usage", message: err.message };
-  if (err instanceof SignInError) return { kind: "sign_in", message: err.message };
+  if (err instanceof SignInError) return { kind: SIGN_IN_KINDS[err.reason], message: err.message };
   if (err instanceof ApiError) return { kind: "server", message: err.message, status: err.status };
   if (err instanceof UserError || err instanceof PreviewError) return { kind: "refused", message: err.message };
   const e = err as Error;

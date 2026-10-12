@@ -1,29 +1,36 @@
-import { chmodSync, mkdirSync, mkdtempSync, openAsBlob, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, openAsBlob, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
-import { ApiError, Client, loadMachineId, type RunStatus } from "../src/api.js";
+import { describe, expect, it } from "vitest";
+import { ApiError, Client, type RunStatus } from "../src/api.js";
+import { SignInError } from "../src/auth.js";
 import type { Manifest } from "../src/pack.js";
 import { fakeFetch, type Handler, json, type Seen } from "./fake-server.js";
 
 function fakeServer(routes: Parameters<typeof fakeFetch>[0]) {
   const { fetch: fetchImpl, seen } = fakeFetch(routes);
   const sleeps: number[] = [];
+  const tokens: boolean[] = [];
+  let n = 1;
   const client = new Client({
     base: "https://api.test/",
-    machineId: "m".repeat(64),
+    // A forced refresh hands out the next token and later calls keep it, as the signed-in Auth does.
+    token: async (force) => {
+      tokens.push(force);
+      if (force) n++;
+      return `tok-${n}`;
+    },
     userAgent: "revefi-agent-analyzer/test",
     fetch: fetchImpl,
     sleep: async (ms) => {
       sleeps.push(ms);
     },
   });
-  return { client, seen, sleeps };
+  return { client, seen, sleeps, tokens };
 }
 
-const device = () => json(200, { device_id: "d1", device_token: "tok-1" });
 const status = (phase: RunStatus["phase"], percent = 50): RunStatus => ({
   run_id: "r1",
   phase,
@@ -44,7 +51,6 @@ describe("Client run flow", () => {
   it("creates, uploads with the signed headers, completes and polls to done", async () => {
     const upload = { url: "https://bucket.test/u?sig=1", method: "PUT", headers: { "Content-Type": "application/gzip", "If-None-Match": "*", "Content-Length": "3" }, expires_at: "2999-01-01T00:00:00Z" };
     const { client, seen } = fakeServer({
-      "POST /api/device": device,
       "POST /api/runs": () => json(201, { run_id: "r1", report_url: "/r/slug", upload }),
       "PUT /u": () => new Response(null, { status: 200 }),
       "POST /api/runs/r1/complete": () => json(200, status("analyzing", 0)),
@@ -59,7 +65,6 @@ describe("Client run flow", () => {
 
     expect(final.phase).toBe("done");
     expect(progress).toEqual([40, 100]);
-    expect(seen.filter((r) => r.url.endsWith("/api/device"))).toHaveLength(1);
     const create = seen.find((r) => r.url.endsWith("/api/runs"));
     expect(create?.headers.authorization).toBe("Bearer tok-1");
     expect(JSON.parse(String(create?.body))).toEqual(manifest);
@@ -71,25 +76,30 @@ describe("Client run flow", () => {
   });
 
   it("returns the last status when the wait times out", async () => {
-    const { client } = fakeServer({ "POST /api/device": device, "GET /api/runs/r1": () => json(200, status("analyzing")) });
+    const { client } = fakeServer({ "GET /api/runs/r1": () => json(200, status("analyzing")) });
     expect((await client.waitForRun("r1", { timeoutMs: 0 })).phase).toBe("analyzing");
   });
 });
 
 describe("Client errors", () => {
-  it("fetches a new token once when the old one is rejected", async () => {
-    const { client, seen } = fakeServer({
-      "POST /api/device": [device, () => json(200, { device_id: "d1", device_token: "tok-2" })],
-      "GET /api/runs/r1": [() => json(401, { detail: "Invalid device token." }), (r) => json(200, { ...status("done"), token: r.headers.authorization })],
+  it("renews the sign-in once when the token is rejected", async () => {
+    const { client, tokens } = fakeServer({
+      "GET /api/runs/r1": [() => json(401, { detail: "Invalid token." }), (r) => json(200, { ...status("done"), token: r.headers.authorization })],
     });
     const s = (await client.status("r1")) as RunStatus & { token: string };
     expect(s.token).toBe("Bearer tok-2");
-    expect(seen.filter((r) => r.url.endsWith("/api/device"))).toHaveLength(2);
+    expect(tokens).toEqual([false, true]);
+  });
+
+  it("asks to sign in again when even a renewed token is rejected", async () => {
+    const { client } = fakeServer({ "GET /api/runs/r1": () => json(401, { detail: "Invalid token." }) });
+    const err = await client.status("r1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SignInError);
+    expect((err as Error).message).toBe("Your sign-in wasn't accepted. Run `revefi-agent-analyzer login` again.");
   });
 
   it("waits out a rate limit and retries", async () => {
     const { client, sleeps } = fakeServer({
-      "POST /api/device": device,
       "GET /api/runs/r1": [() => json(429, { detail: "Too many requests." }, { "retry-after": "3" }), () => json(200, status("done"))],
     });
     expect((await client.status("r1")).phase).toBe("done");
@@ -98,16 +108,14 @@ describe("Client errors", () => {
 
   it("does not retry the daily quota and shows the server's explanation", async () => {
     const { client, seen } = fakeServer({
-      "POST /api/device": device,
-      "POST /api/runs": () => json(429, { detail: "Daily run limit reached for this machine. Try again tomorrow." }),
+      "POST /api/runs": () => json(429, { detail: "You have used today's analysis. Try again tomorrow (UTC)." }),
     });
-    await expect(client.createRun(manifest)).rejects.toThrow("Daily run limit reached for this machine. Try again tomorrow.");
+    await expect(client.createRun(manifest)).rejects.toThrow("You have used today's analysis. Try again tomorrow (UTC).");
     expect(seen.filter((r) => r.url.endsWith("/api/runs"))).toHaveLength(1);
   });
 
   it("names the flags that shrink an oversized upload", async () => {
     const { client } = fakeServer({
-      "POST /api/device": device,
       "POST /api/runs": () => json(413, { detail: "Upload exceeds 209715200 bytes." }),
     });
     await expect(client.createRun(manifest)).rejects.toThrow(/--days.*--exclude-session/);
@@ -115,7 +123,6 @@ describe("Client errors", () => {
 
   it("explains a 409 in terms of the call that hit it", async () => {
     const { client } = fakeServer({
-      "POST /api/device": device,
       "POST /api/runs/r1/complete": () => json(409, { detail: "Upload not found. PUT the file first." }),
       "DELETE /api/me/data": () => json(409, { detail: "A run is still in progress. Try again once it finishes." }),
     });
@@ -125,7 +132,6 @@ describe("Client errors", () => {
 
   it("retries a temporary outage with backoff, then gives up with the status", async () => {
     const { client, sleeps } = fakeServer({
-      "POST /api/device": device,
       "GET /api/runs/r1": () => json(503, { detail: "Could not check the upload. Retry this request." }),
     });
     const err = await client.status("r1").catch((e: unknown) => e);
@@ -137,7 +143,7 @@ describe("Client errors", () => {
   it("turns a network failure into a message naming the host", async () => {
     const client = new Client({
       base: "https://api.test",
-      machineId: "m".repeat(64),
+      token: async () => "tok-1",
       userAgent: "t",
       fetch: (async () => {
         throw new TypeError("fetch failed");
@@ -148,71 +154,33 @@ describe("Client errors", () => {
 
   it("summarises a non-JSON error page instead of dumping it", async () => {
     const { client } = fakeServer({
-      "POST /api/device": device,
       "GET /api/runs/r1": () => new Response("<html>bad gateway</html>", { status: 500, headers: { "content-type": "text/html" } }),
     });
     await expect(client.status("r1")).rejects.toThrow("The server returned HTTP 500: <html>bad gateway</html>.");
   });
 });
 
-describe("loadMachineId", () => {
-  const dir = mkdtempSync(join(tmpdir(), "mid-"));
-  afterAll(() => rmSync(dir, { recursive: true, force: true }));
-
-  it("creates a private random id once and reuses it", async () => {
-    const a = await loadMachineId(dir);
-    expect(a).toMatch(/^[0-9a-f]{64}$/);
-    expect(await loadMachineId(dir)).toBe(a);
-    expect(statSync(join(dir, "machine-id")).mode & 0o077).toBe(0);
-  });
-});
-
-describe("loadMachineId safety", () => {
-  const base = mkdtempSync(join(tmpdir(), "mid2-"));
-  afterAll(() => rmSync(base, { recursive: true, force: true }));
-
-  it("refuses to replace a damaged id, because that would orphan this machine's runs", async () => {
-    const dir = join(base, "damaged");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "machine-id"), "not-hex\n");
-    await expect(loadMachineId(dir)).rejects.toThrow(/is damaged\. Restore it from a backup, or delete it/);
-    expect(readFileSync(join(dir, "machine-id"), "utf8")).toBe("not-hex\n");
-  });
-
-  it("tightens an existing file to owner-only and gives concurrent first runs the same id", async () => {
-    const dir = join(base, "nested", "dir");
-    const [a, b] = await Promise.all([loadMachineId(dir), loadMachineId(dir)]);
-    expect(a).toBe(b);
-    if (process.platform !== "win32") {
-      chmodSync(join(dir, "machine-id"), 0o644);
-      expect(await loadMachineId(dir)).toBe(a);
-      expect(statSync(join(dir, "machine-id")).mode & 0o077).toBe(0);
-    }
-  });
-});
-
 describe("retry policy", () => {
   it("does not retry creating a run on a gateway timeout, but does retry a status read", async () => {
-    const a = fakeServer({ "POST /api/device": device, "POST /api/runs": () => json(504, { detail: "Gateway Timeout" }) });
+    const a = fakeServer({ "POST /api/runs": () => json(504, { detail: "Gateway Timeout" }) });
     await expect(a.client.createRun(manifest)).rejects.toThrow("HTTP 504");
     expect(a.seen.filter((r) => r.url.endsWith("/api/runs"))).toHaveLength(1);
-    const b = fakeServer({ "POST /api/device": device, "GET /api/runs/r1": [() => json(504, {}), () => json(200, status("done"))] });
+    const b = fakeServer({ "GET /api/runs/r1": [() => json(504, {}), () => json(200, status("done"))] });
     expect((await b.client.status("r1")).phase).toBe("done");
   });
 
   it("refreshes the token whichever order outages and a 401 arrive in", async () => {
     const tokenOk = (r: Seen) => (r.headers.authorization === "Bearer tok-2" ? json(200, status("done")) : json(401, {}));
-    const routes = (first: Handler[]) => ({
-      "POST /api/device": [device, () => json(200, { device_id: "d1", device_token: "tok-2" })],
-      "GET /api/runs/r1": [...first, tokenOk],
-    });
+    const routes = (first: Handler[]) => ({ "GET /api/runs/r1": [...first, tokenOk] });
     expect((await fakeServer(routes([() => json(503, {}), () => json(503, {})])).client.status("r1")).phase).toBe("done");
-    expect((await fakeServer(routes([() => json(401, {}), () => json(503, {})])).client.status("r1")).phase).toBe("done");
+    const afterRefresh = fakeServer(routes([() => json(401, {}), () => json(503, {})]));
+    expect((await afterRefresh.client.status("r1")).phase).toBe("done");
+    // Only the call straight after the 401 renews; the retry after the 503 reuses that token.
+    expect(afterRefresh.tokens).toEqual([false, true, false]);
   });
 
   it("does not sit out a long Retry-After, and says how long to wait", async () => {
     const { client, sleeps } = fakeServer({
-      "POST /api/device": device,
       "GET /api/runs/r1": () => json(429, { detail: "Too many requests." }, { "retry-after": "120" }),
     });
     await expect(client.status("r1")).rejects.toThrow("Too many requests. Wait 120 seconds and try again.");
@@ -221,7 +189,6 @@ describe("retry policy", () => {
 
   it("copes with an empty body labelled as JSON", async () => {
     const { client } = fakeServer({
-      "POST /api/device": device,
       "GET /api/runs/r1": () => new Response("", { status: 500, headers: { "content-type": "application/json" } }),
     });
     await expect(client.status("r1")).rejects.toThrow("The server returned HTTP 500. Try again in a few minutes.");
@@ -265,7 +232,7 @@ describe("upload", () => {
     const file = join(mkdtempSync(join(tmpdir(), "up-")), "a.tar.gz");
     writeFileSync(file, Buffer.alloc(1234, 7));
     try {
-      const real = new Client({ base: "http://127.0.0.1", machineId: "m".repeat(64), userAgent: "t" });
+      const real = new Client({ base: "http://127.0.0.1", token: async () => "tok-1", userAgent: "t" });
       await real.upload(
         { url: `http://127.0.0.1:${port}/u`, method: "PUT", headers: { "Content-Type": "application/gzip", "Content-Length": "1234" }, expires_at: "2999-01-01T00:00:00Z" },
         await openAsBlob(file),
@@ -281,7 +248,6 @@ describe("upload", () => {
 describe("error copy", () => {
   it("gives the server's own reason for a missing recommendation and a next step for a long window", async () => {
     const { client } = fakeServer({
-      "POST /api/device": device,
       "POST /api/runs/r1/recommendations/x/feedback": () => json(404, { detail: "Recommendation not found." }),
       "POST /api/runs": () => json(422, { detail: "Window is limited to 7 days." }),
     });
@@ -292,7 +258,7 @@ describe("error copy", () => {
   it("names the underlying network error and hints at proxy settings", async () => {
     const client = new Client({
       base: "https://api.test",
-      machineId: "m".repeat(64),
+      token: async () => "tok-1",
       userAgent: "t",
       env: { HTTPS_PROXY: "http://proxy:3128" },
       fetch: (async () => {

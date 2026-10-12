@@ -111,8 +111,11 @@ here?", one option per entry, by title. For each one the user picks, in turn:
 
 - The user rates a recommendation: `revefi-agent-analyzer feedback '<run_id>' '<id>' up` (or
   `down`).
-- The user wants a shareable link: first say that anyone with the link will be able to read the
-  report, then run `revefi-agent-analyzer share '<run_id>' link`. To make it private again:
-  `share '<run_id>' private`.
+- The user wants to share the report. Reports are private until shared, and only signed-in
+  people can open a shared one. Ask whom with: specific people, by the Google email they sign in
+  with, or anyone signed in who has the link. Then run
+  `revefi-agent-analyzer share '<run_id>' --add '<email>'` (repeat `--add` per person), or
+  `share '<run_id>' --link on`. `--remove '<email>'` and `--link off` take access away, and
+  `share '<run_id>' --json` shows who has it now. Show the user the result and the report link.
 - The user wants their data gone: confirm that this deletes every run, upload and report made
-  from this machine and cannot be undone, then run `revefi-agent-analyzer delete-my-data --yes`.
+  with their account and cannot be undone, then run `revefi-agent-analyzer delete-my-data --yes`.

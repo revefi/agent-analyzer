@@ -28,9 +28,15 @@ export interface PendingLogin {
   config: AuthConfig;
 }
 
-/** Signing in is needed, or failed in a way only the user can fix. */
+/**
+ * Signing in is needed, or failed in a way only the user can fix. `signed_out` is the only
+ * reason a fresh sign-in fixes; `pending` means the user hasn't approved the started one yet.
+ */
 export class SignInError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly reason: "signed_out" | "pending" | "failed" = "failed",
+  ) {
     super(message);
     this.name = "SignInError";
   }
@@ -175,7 +181,7 @@ export class Auth {
   }
 
   private notSignedIn(): SignInError {
-    return new SignInError(`You're not signed in to ${new URL(this.base).host}. Run \`${this.login}\` first.`);
+    return new SignInError(`You're not signed in to ${new URL(this.base).host}. Run \`${this.login}\` first.`, "signed_out");
   }
 
   /** Runs fn while holding this server's renewal lock, so two processes never renew at once. */
@@ -342,7 +348,10 @@ export class Auth {
       const next = this.now() + interval * 1000;
       if (next >= pending.expires_at) throw await this.expired();
       if (next > waitUntil) {
-        throw new SignInError(`Still waiting for you to approve the sign-in in your browser. Run \`${this.login} --wait\` once you have.`);
+        throw new SignInError(
+          `Still waiting for you to approve the sign-in in your browser. Run \`${this.login} --wait\` once you have.`,
+          "pending",
+        );
       }
       await this.sleep(interval * 1000);
     }
@@ -398,7 +407,7 @@ export class Auth {
       if (body.error === "invalid_grant") {
         await rm(this.file(CREDENTIALS), { force: true });
         await rm(this.file(ACCESS), { force: true });
-        throw new SignInError(`Your sign-in to ${new URL(this.base).host} has expired. Run \`${this.login}\` again.`);
+        throw new SignInError(`Your sign-in to ${new URL(this.base).host} has expired. Run \`${this.login}\` again.`, "signed_out");
       }
       if (status === 429) throw new SignInError("Sign-in is busy. Wait a minute and try again.");
       throw new SignInError(`Couldn't renew your sign-in (HTTP ${status}). Try again in a few minutes.`);

@@ -15,6 +15,14 @@ const claude = join(tmp, "claude");
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
 beforeEach(() => {
+  // Signed in to api.test: the token endpoint below turns this into an access token.
+  const creds = join(tmp, "config", "servers", "api.test");
+  rmSync(creds, { recursive: true, force: true });
+  mkdirSync(creds, { recursive: true });
+  writeFileSync(
+    join(creds, "credentials.json"),
+    JSON.stringify({ domain: "auth.test", audience: "https://api.test/api", client_id: "cli", refresh_token: "rt", email: "ada@example.com" }),
+  );
   rmSync(repo, { recursive: true, force: true });
   rmSync(claude, { recursive: true, force: true });
   mkdirSync(repo, { recursive: true });
@@ -37,8 +45,12 @@ const rec = (id: string, title: string, usd: number, verdict = "optimizable") =>
 });
 
 function server(finalPhase = "done") {
-  return fakeFetch({
-    "POST /api/device": () => json(200, { device_id: "d", device_token: "t" }),
+  return fakeFetch(serverRoutes(finalPhase));
+}
+
+function serverRoutes(finalPhase = "done"): Parameters<typeof fakeFetch>[0] {
+  return {
+    "POST /oauth/token": () => json(200, { access_token: "at", expires_in: 3600 }),
     "POST /api/runs": () =>
       json(201, {
         run_id: "r1",
@@ -61,9 +73,10 @@ function server(finalPhase = "done") {
         root_causes: [],
       }),
     "POST /api/runs/r1/recommendations/a/feedback": () => json(200, {}),
-    "POST /api/runs/r1/visibility": () => json(200, { visibility: "link" }),
+    "GET /api/runs/r1/sharing": () => json(200, { link: false, emails: ["ada@example.com"] }),
+    "PUT /api/runs/r1/sharing": (req) => json(200, JSON.parse(String(req.body))),
     "DELETE /api/me/data": () => new Response(null, { status: 204 }),
-  });
+  };
 }
 
 async function run(
@@ -104,7 +117,8 @@ describe("consent", () => {
   it("uploads nothing when the user answers no", async () => {
     const r = await run(["analyze"], { tty: true, answer: false });
     expect(r.code).toBe(1);
-    expect(r.seen).toEqual([]);
+    // Only the sign-in was checked; nothing reached the analyzer.
+    expect(calls(r.seen)).toEqual(["POST /oauth/token"]);
   });
 });
 
@@ -118,7 +132,7 @@ describe("prepare then upload (the plugin's path)", () => {
     const up = await run(["upload", p.preview_dir, "--yes", "--json"], { env: { CLAUDECODE: "1" } });
     expect(up.code).toBe(0);
     expect(calls(up.seen)).toEqual([
-      "POST /api/device",
+      "POST /oauth/token",
       "POST /api/runs",
       "PUT /u",
       "POST /api/runs/r1/complete",
@@ -190,15 +204,34 @@ describe("feedback, share and delete", () => {
     expect((await run(["feedback", "r1", "a", "meh"])).code).toBe(2);
   });
 
-  it("shares by link and prints the link", async () => {
-    const r = await run(["share", "r1", "link"]);
-    expect(r.out).toBe("Anyone with the link can now open the report: https://api.test/r/slug");
+  it("shares with more people and with signed-in link readers, keeping who already had access", async () => {
+    const r = await run(["share", "r1", "--add", " Grace@Example.com ", "--link", "on"]);
+    expect(r.code).toBe(0);
+    const put = r.seen.find((s) => s.method === "PUT");
+    expect(JSON.parse(String(put?.body))).toEqual({ link: true, emails: ["ada@example.com", "grace@example.com"] });
+    expect(r.out).toBe(
+      "Shared with: ada@example.com, grace@example.com\nAnyone signed in who has the link can open it.\nReport: https://api.test/r/slug",
+    );
   });
 
-  it("has nothing to delete before anything was uploaded", async () => {
+  it("shows sharing without changing it, and removes people", async () => {
+    const shown = await run(["share", "r1"]);
+    expect(shown.seen.some((s) => s.method === "PUT")).toBe(false);
+    const removed = await run(["share", "r1", "--remove", "ada@example.com"]);
+    expect(JSON.parse(String(removed.seen.find((s) => s.method === "PUT")?.body))).toEqual({ link: false, emails: [] });
+  });
+
+  it("rejects a malformed email or link setting before calling the server", async () => {
+    expect((await run(["share", "r1", "--add", "grace"])).code).toBe(2);
+    expect((await run(["share", "r1", "--link", "yes"])).code).toBe(2);
+  });
+
+  it("asks to sign in before deleting", async () => {
     rmSync(join(tmp, "config"), { recursive: true, force: true });
     const r = await run(["delete-my-data", "--yes"]);
-    expect(r).toMatchObject({ code: 0, out: "Nothing to delete: nothing has been uploaded from this machine.", seen: [] });
+    expect(r.code).toBe(1);
+    expect(r.err).toBe("You're not signed in to api.test. Run `revefi-agent-analyzer login` first.");
+    expect(r.seen).toEqual([]);
   });
 
   it("refuses to delete without --yes when there is no terminal, and deletes with it", async () => {
@@ -208,7 +241,9 @@ describe("feedback, share and delete", () => {
     expect(refused.seen).toEqual([]);
     const done = await run(["delete-my-data", "--yes"]);
     expect(done.code).toBe(0);
-    expect(calls(done.seen)).toEqual(["POST /api/device", "DELETE /api/me/data"]);
+    // The access token from `status` is reused, not renewed.
+    expect(calls(done.seen)).toEqual(["DELETE /api/me/data"]);
+    expect(done.out).toBe("Deleted every run, upload and report made with ada@example.com. Local previews in .revefi/ are untouched.");
   });
 });
 
@@ -247,7 +282,7 @@ describe("upload safety", () => {
 
   it("keeps the run id visible when something fails after the run started", async () => {
     const failing = fakeFetch({
-      "POST /api/device": () => json(200, { device_id: "d", device_token: "t" }),
+      "POST /oauth/token": () => json(200, { access_token: "at", expires_in: 3600 }),
       "POST /api/runs": () => json(201, { run_id: "r1", report_url: "/r/slug", upload: { url: "https://bucket.test/u", headers: {}, expires_at: "2999-01-01T00:00:00Z" } }),
       "PUT /u": () => new Response(null, { status: 200 }),
       "POST /api/runs/r1/complete": () => json(200, { run_id: "r1", phase: "analyzing", percent: 0, cost_capped: false, report_url: "/r/slug" }),
@@ -349,12 +384,56 @@ describe("sign-in", () => {
     expect(out.join("\n")).toBe("Signed in as ada@example.com.");
   });
 
+  it("signs in on the spot when analyze runs in a terminal without a sign-in", async () => {
+    const opened: string[] = [];
+    const srv = fakeFetch({ ...serverRoutes(), ...AUTH0 });
+    const err: string[] = [];
+    const code = await main(["analyze", "--yes"], {
+      io: { out: () => undefined, err: (s) => err.push(s) },
+      version: "0.1.0",
+      cwd: repo,
+      env: { CLAUDE_CONFIG_DIR: claude, REVEFI_ANALYZER_API: "https://api.test" },
+      isTTY: true,
+      ask: async () => true,
+      fetch: srv.fetch,
+      sleep: async () => undefined,
+      configDir: join(tmp, "config"),
+      openUrl: (url) => opened.push(url),
+    });
+    expect(opened).toHaveLength(1);
+    expect(err.join("\n")).toContain("Signed in as ada@example.com.");
+    expect(calls(srv.seen).filter((c) => c === "POST /oauth/device/code")).toHaveLength(1);
+    expect(code).toBe(0);
+  });
+
   it("reports a missing sign-in as its own error kind for scripts", async () => {
     const r = await run(["whoami", "--json"], { srv: fakeFetch(AUTH0) });
     expect(r.code).toBe(1);
     expect(JSON.parse(r.out)).toEqual({
       error: { kind: "sign_in", message: "You're not signed in to api.test. Run `revefi-agent-analyzer login` first." },
     });
+  });
+
+  it("reports a sign-in still awaiting approval as its own kind, so scripts keep waiting", async () => {
+    const pendingAuth0 = { ...AUTH0, "POST /oauth/token": () => json(403, { error: "authorization_pending" }) };
+    await run(["login", "--start", "--json"], { srv: fakeFetch(pendingAuth0) });
+    const r = await run(["login", "--wait", "--json", "--timeout", "1"], { srv: fakeFetch(pendingAuth0) });
+    expect(r.code).toBe(1);
+    expect(JSON.parse(r.out).error.kind).toBe("sign_in_pending");
+  });
+
+  it("doesn't start a browser sign-in when the problem is something a sign-in can't fix", async () => {
+    const creds = join(tmp, "config", "servers", "api.test");
+    mkdirSync(creds, { recursive: true });
+    writeFileSync(
+      join(creds, "credentials.json"),
+      JSON.stringify({ domain: "auth.test", audience: "https://api.test/api", client_id: "cli", refresh_token: "rt", email: "ada@example.com" }),
+    );
+    const busy = fakeFetch({ ...serverRoutes(), ...AUTH0, "POST /oauth/token": () => json(429, { error: "too_many_requests" }) });
+    const r = await run(["analyze", "--yes"], { tty: true, srv: busy });
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("Sign-in is busy");
+    expect(calls(r.seen)).not.toContain("POST /oauth/device/code");
   });
 
   it("signs out, revoking the session", async () => {
