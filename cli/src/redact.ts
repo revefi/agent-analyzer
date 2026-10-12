@@ -243,6 +243,24 @@ export function scrubText(
   return home ? rewriteHome(s, home, counts) : s;
 }
 
+/** Account names that are the same on every machine, so they identify no one. */
+const GENERIC_USERS = new Set([
+  "root", "admin", "administrator", "user", "users", "ubuntu", "runner", "guest", "test", "home",
+  "developer", "ec2-user", "vagrant", "node", "default", "local", "owner", "staff", "codespace",
+  "jenkins", "circleci", "azureuser", "postgres", "debian", "centos", "docker", "nobody",
+  "www-data", "vscode", "gitpod", "coder", "build", "sandbox", "cloudshell-user",
+]);
+
+/**
+ * Matches the account name where it stands alone, unless it is too short or generic to be
+ * anyone's. `{USER}` replaces it: folder names carry it too, and Windows forbids `<` in them.
+ */
+function userPattern(home: string): RegExp | undefined {
+  const user = home.split(/[/\\]/).pop() ?? "";
+  if (user.length < 4 || GENERIC_USERS.has(user.toLowerCase())) return undefined;
+  return new RegExp(`(?<![A-Za-z0-9])${escapeRe(user)}(?![A-Za-z0-9])`, "g");
+}
+
 function normalHome(home: string | undefined): string | undefined {
   const h = home?.replace(/[/\\]+$/, "");
   return h && h.length >= 2 ? h : undefined;
@@ -270,7 +288,9 @@ function rewriteHome(text: string, home: string, counts: Counts): string {
         "home-path",
       );
   }
-  return s;
+  // The account name also turns up outside the home folder (`/private/var/tmp/_bazel_<name>/`).
+  const user = userPattern(h);
+  return user ? replaceCounting(s, user, fixed("{USER}"), counts, "username") : s;
 }
 
 /** The upload folder name for a project: the user's home part replaced with `~`. */
@@ -278,9 +298,9 @@ export function aliasProjectDir(project: string, home?: string): string {
   const h = normalHome(home);
   if (!h) return project;
   const enc = encodeProjectDir(h);
-  return project === enc || project.startsWith(`${enc}-`)
-    ? `~${project.slice(enc.length)}`
-    : project;
+  const aliased = project === enc || project.startsWith(`${enc}-`) ? `~${project.slice(enc.length)}` : project;
+  const user = userPattern(h);
+  return user ? aliased.replace(user, "{USER}") : aliased;
 }
 
 function escapeRe(s: string): string {

@@ -60,6 +60,55 @@ function validateNINO(value: string): boolean {
   return /^[A-CEGHJ-PR-TW-Z][A-CEGHJ-NPR-TW-Z]\d{6}[A-D]$/.test(nino) && !/^(?:BG|GB|NK|KN|TN|NT|ZZ)/.test(nino);
 }
 
+const VERHOEFF_D = [
+  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+  [1, 2, 3, 4, 0, 6, 7, 8, 9, 5],
+  [2, 3, 4, 0, 1, 7, 8, 9, 5, 6],
+  [3, 4, 0, 1, 2, 8, 9, 5, 6, 7],
+  [4, 0, 1, 2, 3, 9, 5, 6, 7, 8],
+  [5, 9, 8, 7, 6, 0, 4, 3, 2, 1],
+  [6, 5, 9, 8, 7, 1, 0, 4, 3, 2],
+  [7, 6, 5, 9, 8, 2, 1, 0, 4, 3],
+  [8, 7, 6, 5, 9, 3, 2, 1, 0, 4],
+  [9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+];
+const VERHOEFF_P = [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], [1, 5, 7, 6, 2, 8, 3, 0, 9, 4]];
+for (let i = 2; i < 8; i++) VERHOEFF_P.push(VERHOEFF_P[1]!.map((j) => VERHOEFF_P[i - 1]![j]!));
+
+/** Verhoeff check: Aadhaar's last digit. */
+export function validateVerhoeff(value: string): boolean {
+  const digits = digitsOf(value);
+  if (!digits) return false;
+  let c = 0;
+  for (let i = 0; i < digits.length; i++) {
+    c = VERHOEFF_D[c]![VERHOEFF_P[i % 8]![Number(digits[digits.length - 1 - i])]!]!;
+  }
+  return c === 0;
+}
+
+/** UPI handles from the major banks and apps; a bare `name@word` is usually an npm scope or a mention. */
+const UPI_HANDLES = [
+  "okhdfcbank", "okicici", "oksbi", "okaxis", "ybl", "ibl", "axl", "paytm", "ptyes", "pthdfc",
+  "ptsbi", "ptaxis", "apl", "yapl", "rapl", "upi", "waicici", "wahdfcbank", "wasbi", "waaxis",
+  "axisbank", "hdfcbank", "icici", "sbi", "kotak", "kmbl", "idfcbank", "yesbank", "indus",
+  "federal", "rbl", "aubank", "kbl", "cnrb", "pnb", "unionbank", "boi", "mahb", "barodampay",
+  "airtel", "freecharge", "jupiteraxis", "fam", "slice", "naviaxis", "superyes", "abfspay",
+  "ikwik", "postbank", "dlb", "axisb", "yescred", "fifederal", "okbizaxis", "jio", "mbk", "idbi",
+  "iob", "hsbc", "sc",
+];
+
+/**
+ * A label just before a number: its own word, or the start or end of a camelCase or snake_case
+ * name (`phone`, `userPhone`, `PHONE_NO`), never part of another word (`telemetry`, `hotel_id`).
+ */
+function label(words: string[]): string {
+  const lower = words.join("|");
+  const upper = words.map((w) => w.toUpperCase()).join("|");
+  const title = words.map((w) => w[0]!.toUpperCase() + w.slice(1)).join("|");
+  const suffix = "(?:[ _]?(?:no|No|NO|num|Num|NUM|number|Number|NUMBER))?";
+  return `(?:(?<![A-Za-z])(?:${lower}|${upper})|(?<![A-Z])(?:${title}))${suffix}(?![a-z])[\\s"':=#.-]{1,6}`;
+}
+
 /** Infrastructure ranges stay readable: they identify no one and matter to the analysis. */
 function personalIPv4(ip: string): boolean {
   if (!isIPv4(ip)) return false;
@@ -92,7 +141,7 @@ const PII_RULES: PiiRule[] = [
   },
   {
     id: "card-number",
-    re: /(?<![\w.-])(?:[2-6]\d{3}([ .-]?)\d{4}\1\d{4}\1\d{1,7}|3[47]\d{2}([ .-]?)\d{6}\2\d{5})(?![\w-]|\.\d)/g,
+    re: /(?<![\w.-])(?:[2-68]\d{3}([ .-]?)\d{4}\1\d{4}\1\d{1,7}|3[47]\d{2}([ .-]?)\d{6}\2\d{5})(?![\w-]|\.\d)/g,
     placeholder: "<CARD_NUMBER>",
     valid: (m) => digitsOf(m).length >= 13 && validateLuhn(m),
   },
@@ -116,6 +165,31 @@ const PII_RULES: PiiRule[] = [
     valid: validateNINO,
   },
   {
+    // Aadhaar. Ungrouped only right after its label, because a tenth of all 12-digit numbers (AWS
+    // account IDs, timestamps) pass the checksum.
+    id: "national-id",
+    re: new RegExp(
+      String.raw`(?<![\w.-])[2-9]\d{3}[ .-]\d{4}[ .-]\d{4}(?![\w-]|\.\d)|(?<=${label(["aadhaar", "aadhar", "uidai"])})[2-9]\d{11}(?!\w)`,
+      "g",
+    ),
+    placeholder: "<NATIONAL_ID>",
+    valid: validateVerhoeff,
+  },
+  {
+    // PAN: the fourth letter is the holder type (P person, C company, H family, ...).
+    id: "national-id",
+    re: /(?<![A-Za-z0-9])[A-Z]{3}[ABCFGHJLPT][A-Z]\d{4}[A-Z](?![A-Za-z0-9])/g,
+    placeholder: "<NATIONAL_ID>",
+  },
+  {
+    id: "upi-id",
+    re: new RegExp(
+      `(?<![\\w.-])(?:[\\w.-]{2,256}@(?:${UPI_HANDLES.join("|")})|\\d{10}@[a-z]{2,32})(?![\\w.-])`,
+      "gi",
+    ),
+    placeholder: "<UPI_ID>",
+  },
+  {
     id: "national-id",
     re: /(?<![\w-])\d{3}([ -])\d{3}\1\d{3}(?![\w-])/g,
     placeholder: "<NATIONAL_ID>",
@@ -134,11 +208,25 @@ const PII_RULES: PiiRule[] = [
     valid: personalIPv6,
   },
   {
+    // Indian mobile. Ten bare digits are a count or an ID far more often, so they need a prefix,
+    // a space or dashes, or a label like "phone" just before.
+    id: "phone",
+    re: new RegExp(
+      String.raw`(?<![\w+/.-])(?:\+91[ -]?[6-9]\d{4}[ -]?\d{5}|(?:91|0)[ -][6-9]\d{4}[ -]?\d{5}|[6-9]\d{4} \d{5}|[6-9]\d{3}([ -])\d{3}\1\d{3}|[6-9]\d([ -])\d{4}\2\d{4}|(?<=${label(["phone", "mobile", "mob", "cell", "cellphone", "contact", "whatsapp", "tel", "telephone"])})(?:\+?91|0)?[6-9]\d{9})(?![\w-]|\.\d)`,
+      "g",
+    ),
+    placeholder: "<PHONE>",
+    // An exact multiple of 1024 is a byte size (8589934592), not a phone number.
+    valid: (m) => Number(m.replace(/\D/g, "").slice(-10)) % 1024 !== 0,
+  },
+  {
     // Written like a phone number: with a `+` country code, `(415) 555-0132`, `415-555-0132` or
     // `415 555 0132`. A bare run of digits is an ID or a timestamp far more often.
     id: "phone",
-    re: /(?<![\w+/.-])(?:\+\d{10,14}|\+\d{1,3}[ .-]?(?:\(\d{1,4}\)[ .-]?)?\d{1,5}(?:[ .-]\d{2,8}){1,4}|(?:1[ .-])?(?:\(\d{3}\)[ .-]?\d{3}[ .-]\d{4}|\d{3}([ .-])\d{3}\1\d{4}))(?![\w-]|\.\d)/g,
+    re: /(?<![\w+/.-])(?:\+\d{1,3}[ .-]?(?:\(\d{1,4}\)[ .-]?)?\d{1,5}(?:[ .-]\d{2,8}){1,4}|\+\d{1,3}[ .-]?\d{2,5}[ .-]?\d{2,8}|(?:1[ .-])?(?:\(\d{3}\)[ .-]?\d{3}[ .-]\d{4}|\d{3}([ .-])\d{3}\1\d{4}))(?![\w-]|\.\d)/g,
     placeholder: "<PHONE>",
+    // E.164 allows at most 15 digits; fewer than 10 is a diff line or an offset (`+86400000`).
+    valid: (m) => /^(?:\D*\d){10,15}\D*$/.test(m),
   },
 ];
 

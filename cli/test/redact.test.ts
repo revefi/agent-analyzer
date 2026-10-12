@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { validateLuhn, validateVerhoeff } from "../src/pii.js";
 import { aliasProjectDir, type Counts, redactJson, redactJsonl, redactLine, scrubText } from "../src/redact.js";
 
 // Fake secrets are assembled at runtime so no secret-shaped literal sits in the repo.
@@ -167,6 +168,24 @@ describe("scrubText: more secret shapes", () => {
     expect(scrub(once.text)).toEqual({ text: once.text, counts: {} });
   });
 
+  it("replaces the username wherever it stands alone, unless it is generic or short", () => {
+    const r = scrub("cd /private/var/tmp/_bazel_patricia/b1 && ls Users/patricia/repo patricias", "/Users/patricia");
+    expect(r.text).toBe("cd /private/var/tmp/_bazel_{USER}/b1 && ls Users/{USER}/repo patricias");
+    expect(r.counts.username).toBe(2);
+    expect(scrub("sudo -u ubuntu ls /tmp/ubuntu", "/home/ubuntu").text).toBe("sudo -u ubuntu ls /tmp/ubuntu");
+    expect(scrub("the pat file", "/Users/pat").text).toBe("the pat file");
+    expect(scrub("image jenkins/jenkins:lts", "/home/jenkins").text).toBe("image jenkins/jenkins:lts");
+  });
+
+  it("names a project folder with the username the same way in paths and folder names", () => {
+    const home = "/Users/patricia";
+    const folder = aliasProjectDir("-Users-patricia-patricia-site", home);
+    expect(folder).toBe("~-{USER}-site");
+    expect(scrub("Read ~/.claude/projects/-Users-patricia-patricia-site/memory/a.md", home).text).toBe(
+      `Read ~/.claude/projects/${folder}/memory/a.md`,
+    );
+  });
+
   it("rewrites the home path at every path boundary, and never a bare /", () => {
     const r = scrub("cd /Users/pat; ls (/Users/pat) `/Users/pat`, /Users/pat. /Users/pat-old", "/Users/pat/");
     expect(r.text).toBe("cd ~; ls (~) `~`, ~. /Users/pat-old");
@@ -190,6 +209,11 @@ describe("scrubText: more secret shapes", () => {
     ["IBAN groups", `GB82 ${"AB12 ".repeat(200_000)}`],
     ["phone groups", `+1 ${"12 ".repeat(330_000)}`],
     ["dashed and quoted words", "a-b'".repeat(250_000)],
+    ["UPI local parts", "a.b@".repeat(250_000)],
+    ["Indian numbers", "91 98765 ".repeat(110_000)],
+    ["Aadhaar groups", "2345 ".repeat(200_000)],
+    ["plus and digit runs", `+${"1".repeat(30)}x `.repeat(30_000)],
+    ["labels and digits", "mobile_no=987654321 ".repeat(50_000)],
   ])("stays fast on a megabyte of %s", (label, input) => {
     const t0 = performance.now();
     scrubText(input, {}, "/Users/pat", true);
@@ -260,6 +284,19 @@ describe("scrubText: personal data", () => {
       "from 2001:db8:85a3::8a2e:370:7334 and 2600:9000:24d9:4800:7:29a6:f140:93a1",
       "from <IP_ADDRESS> and <IP_ADDRESS>",
     ],
+    ["phone", "call +91-9876543210, 98765 43210 or 0 98765 43210", "call <PHONE>, <PHONE> or <PHONE>"],
+    ["phone", "phone: 9876543210, {\"mobile_number\": \"09876543210\"}, whatsappNo=919876543210", "phone: <PHONE>, {\"mobile_number\": \"<PHONE>\"}, whatsappNo=<PHONE>"],
+    ["phone", "UK +44-2079460958, IN +919876543210", "UK <PHONE>, IN <PHONE>"],
+    ["phone", "call 9876-543-210, 98 7654 3210 or 91-98765-43210", "call <PHONE>, <PHONE> or <PHONE>"],
+    ["upi-id", "pay ravi@yescred, ravi@fifederal or 9876543210@anybank", "pay <UPI_ID>, <UPI_ID> or <UPI_ID>"],
+    ["national-id", "Aadhaar no: 234567890124, 2345.6789-0124", "Aadhaar no: <NATIONAL_ID>, <NATIONAL_ID>"],
+    ["national-id", "{\"aadhaar_number\": \"234567890124\"} aadhaarNo=234567890124", "{\"aadhaar_number\": \"<NATIONAL_ID>\"} aadhaarNo=<NATIONAL_ID>"],
+    ["upi-id", "pay ravi@jio or ravi@hsbc", "pay <UPI_ID> or <UPI_ID>"],
+    ["phone", "userPhone: 9876543210, PHONE_NO=9876543210, Phone number: 9876543210", "userPhone: <PHONE>, PHONE_NO=<PHONE>, Phone number: <PHONE>"],
+    ["upi-id", "pay ravi.kumar@okhdfcbank or ravi@ybl", "pay <UPI_ID> or <UPI_ID>"],
+    ["national-id", "IDs 2345 6789 0124 or 2345-6789-0124", "IDs <NATIONAL_ID> or <NATIONAL_ID>"],
+    ["national-id", "PAN ABCPE1234F", "PAN <NATIONAL_ID>"],
+    ["card-number", "RuPay 8171 2345 6789 0125", "RuPay <CARD_NUMBER>"],
   ])("%s: %s", (id, input, output) => {
     const r = scrub(input);
     expect(r.text).toBe(output);
@@ -276,14 +313,57 @@ describe("scrubText: personal data", () => {
       "- [4.3.2.1. Property](#p) in v1.2.3.4, then 4.3.12.10.2.",
       "hosts 10.0.4.12, 172.31.0.5, 192.168.1.1, 127.0.0.1, ::1, fe80::1ff:fe23:4567:890a",
       "a[1::2], s[2::], B2::C, dead:beef::1, git@ssh.dev.azure.com:v3/org/repo",
+      "npm i @paytm/sdk @ybl/ui, epoch 1696871234, offset +1 2 34, AWSKEYNAME1",
+      "mem 8589934592 bytes, limit: 6442450944, arn:aws:iam::234567890124:role/x, at 202610121230",
+      "+86400000, +2026-10-12, Abcpe1234F, abcpe1234f, react1234s build2024a",
+      "ports 60000-65535, rows_produced: 7234567891, bytes_scanned 6234567891, uid 234567890124",
+      "arn:aws:iam::916789012345:role/x, 9876543210 rows",
+      "total_calls: 7234567891, hotel_id=8123456789, cancelled_rows: 9876543210, telemetry_bytes 9123456789",
+      "contact_count: 7123456789, GUID=234567890124, UUID 234567890124",
     ].join("\n");
     expect(scrub(text)).toEqual({ text, counts: {} });
   });
 
   it("leaves numbers that fail the checksum", () => {
     const text =
-      "order 4111 1111 1111 1112, IBAN GB00WEST12345698765432, SSN 000-12-3456";
+      "order 4111 1111 1111 1112, IBAN GB00WEST12345698765432, SSN 000-12-3456, Aadhaar 2345 6789 0123";
     expect(scrub(text)).toEqual({ text, counts: {} });
+  });
+
+  it("removes randomly generated valid values from code-like text", () => {
+    let seed = 7;
+    const rand = (n: number) => {
+      seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+      return (seed >>> 16) % n;
+    };
+    const digits = (n: number) => Array.from({ length: n }, () => rand(10)).join("");
+    const withCheck = (base: string, ok: (v: string) => boolean) =>
+      [..."0123456789"].map((d) => base + d).find(ok) ?? "";
+    const iban = () => {
+      const bban = `WEST${digits(14)}`;
+      const n = [...`${bban}GB00`].map((c) => (/[A-Z]/.test(c) ? c.charCodeAt(0) - 55 : c)).join("");
+      return `GB${String(98n - (BigInt(n) % 97n)).padStart(2, "0")}${bban}`;
+    };
+    const makers = [
+      () => withCheck(`4${digits(14)}`, (v) => validateLuhn(v)),
+      () => withCheck(`${2 + rand(8)}${digits(10)}`, validateVerhoeff).replace(/(\d{4})(?=\d)/g, "$1 "),
+      iban,
+      () => `user${digits(3)}@corp${digits(2)}.io`,
+      () => `+91 ${6 + rand(4)}${digits(4)} ${digits(5)}`,
+      () => `name.${digits(2)}@oksbi`,
+    ];
+    const templates = [
+      (v: string) => `const user = { id: 42, contact: "${v}", plan: "pro" };`,
+      (v: string) => `INSERT INTO payments VALUES ('${v}', 1999);`,
+      (v: string) => `$ curl -d 'value=${v}&exp=12/27' https://api.corp.io/pay`,
+      (v: string) => `2026-10-09T12:00:00Z INFO user=${v} action=login`,
+      (v: string) => `| ${v} | active |`,
+    ];
+    for (let i = 0; i < 600; i++) {
+      const value = makers[i % makers.length]!();
+      const text = templates[rand(templates.length)]!(value);
+      expect(scrub(text).text, text).not.toContain(value);
+    }
   });
 
   it("redacts every match in a long tool output", () => {
@@ -298,6 +378,16 @@ describe("scrubText: personal data", () => {
 });
 
 describe("redactLine", () => {
+  it("redacts personal data inside a JSON-encoded tool result and keeps valid JSON", () => {
+    const inner = JSON.stringify({ user: { email: "jane@corp.io", phone: "+91 98765 43210" } });
+    const line = JSON.stringify({ message: { content: [{ type: "tool_result", content: `cat user.json\n${inner}` }] } });
+    const counts: Counts = {};
+    const out = redactLine(line, counts) ?? "";
+    expect(() => JSON.parse(out)).not.toThrow();
+    expect(out).not.toMatch(/jane@corp|98765/);
+    expect(counts).toMatchObject({ email: 1, phone: 1 });
+  });
+
   it("redacts values stored under secret-named JSON keys, not token counters", () => {
     const line = JSON.stringify({
       message: {
