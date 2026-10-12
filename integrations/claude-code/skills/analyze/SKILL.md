@@ -42,9 +42,9 @@ revefi-agent-analyzer login --start --json
 ```
 
 Show the user `verification_uri_complete` and `user_code`, and tell them to open the link,
-check that it shows the same code, and continue with Google. Someone signing in for the first
-time gets an account then; there is no separate sign-up. Then wait, with a Bash timeout of
-600000 ms:
+check that it shows the same code, and continue with Google or an emailed code. Someone
+signing in for the first time gets an account then; there is no separate sign-up. Then wait,
+with a Bash timeout of 600000 ms:
 
 ```bash
 revefi-agent-analyzer login --wait --json --timeout 420
@@ -141,7 +141,7 @@ here?", one option per entry, by title. For each one the user picks, in turn:
 - The user rates a recommendation: `revefi-agent-analyzer feedback '<run_id>' '<id>' up` (or
   `down`).
 - The user wants to share the report. Reports are private until shared, and only signed-in
-  people can open a shared one. Ask whom with: specific people, by the Google email they sign in
+  people can open a shared one. Ask whom with: specific people, by the email they sign in
   with, or anyone signed in who has the link. Then run
   `revefi-agent-analyzer share '<run_id>' --add '<email>'` (repeat `--add` per person), or
   `share '<run_id>' --link on`. `--remove '<email>'` and `--link off` take access away, and

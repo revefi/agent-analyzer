@@ -4285,9 +4285,9 @@ function openInBrowser(url) {
   child.unref();
 }
 function describeLogin(e, p2) {
-  e.io.err(`Open this link to sign in with Google:
+  e.io.err(`Open this link to sign in:
   ${p2.verification_uri_complete}`);
-  e.io.err(`Check that the page shows the code ${p2.user_code}, then approve it.`);
+  e.io.err(`Check that the page shows the code ${p2.user_code}, then continue with Google or an emailed code.`);
 }
 function client(e, api, a = auth(e, api)) {
   return new Client({
@@ -4508,7 +4508,7 @@ The run was started; check it later with: revefi-agent-analyzer status ${run.run
 }
 var COMMANDS = {
   login: {
-    summary: "Sign in with Google (--start and --wait split it in two, for scripts)",
+    summary: "Sign in with Google or an emailed code (--start and --wait split it in two, for scripts)",
     async run(args, e) {
       const { values } = parse(args, {
         ...API_OPTION,

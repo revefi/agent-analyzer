@@ -133,8 +133,8 @@ function openInBrowser(url: string): void {
 }
 
 function describeLogin(e: Env, p: PendingLogin): void {
-  e.io.err(`Open this link to sign in with Google:\n  ${p.verification_uri_complete}`);
-  e.io.err(`Check that the page shows the code ${p.user_code}, then approve it.`);
+  e.io.err(`Open this link to sign in:\n  ${p.verification_uri_complete}`);
+  e.io.err(`Check that the page shows the code ${p.user_code}, then continue with Google or an emailed code.`);
 }
 
 function client(e: Env, api?: string, a: Auth = auth(e, api)): Client {
@@ -406,7 +406,7 @@ async function follow(e: Env, run: Omit<Started, "status">, timeoutSec: number, 
 
 export const COMMANDS: Record<string, { summary: string; run: (args: string[], e: Env) => Promise<number> }> = {
   login: {
-    summary: "Sign in with Google (--start and --wait split it in two, for scripts)",
+    summary: "Sign in with Google or an emailed code (--start and --wait split it in two, for scripts)",
     async run(args, e) {
       const { values } = parse(args, {
         ...API_OPTION,
