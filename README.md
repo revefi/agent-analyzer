@@ -74,6 +74,10 @@ CLI's name and version.
   Slack, Stripe, npm, PyPI, Hugging Face, SendGrid, Databricks, Twilio, Azure), private keys,
   JWTs, authorization and cookie headers, passwords in URLs and on command lines, and values
   under names like `password`, `secret`, `token` or `api_key`;
+- personal data in known formats: email addresses, phone numbers written as phone numbers
+  (`+44 20 7946 0958`, `(415) 555-0132`), payment card numbers, IBANs, US Social Security
+  numbers, UK National Insurance and Canadian SIN numbers, and IP addresses outside private
+  ranges. Card, bank and ID numbers must also pass their checksum;
 - every value in `.env` files Claude read or wrote;
 - images and long base64 data;
 - the full copies of files Claude Code keeps from before each edit;
@@ -82,9 +86,10 @@ CLI's name and version.
 **What is never sent:** tool output Claude Code saves outside the transcripts (`tool-results/`),
 sessions outside the window or the chosen scope, and anything else on your machine.
 
-Redaction recognises known formats; it cannot catch every kind of sensitive text. Read the
-preview if a session touched something you would not share, and leave sessions out with
-`--exclude-session <id>`.
+Redaction recognises known formats; it cannot catch every kind of sensitive text. People's
+names and street addresses are not detected, because the detectors for them also rewrite
+ordinary code. Read the preview if a session touched something you would not share, and leave
+sessions out with `--exclude-session <id>`.
 
 To remove everything you have uploaded with your account, at any time:
 
