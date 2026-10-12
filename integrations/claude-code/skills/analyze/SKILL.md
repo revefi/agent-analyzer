@@ -113,7 +113,8 @@ Decide on the `phase` in the JSON, not the exit code:
 
 Show the report link (`report_url`), then each entry of `top` as a numbered line: its `title`
 and `≈ $<cluster.window_usd>` spent on it in this window. Keep it short; the report page has the
-detail. If `cost_capped` is true, say the report covers a sample of the sessions.
+detail. If `cost_capped` is true, say the analyzer hit today's analysis limit partway
+through, so parts of the report may be missing, and a run tomorrow gives the full report.
 
 ## 5. Offer the fixes
 

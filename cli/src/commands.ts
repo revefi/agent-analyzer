@@ -406,7 +406,7 @@ async function follow(e: Env, run: Omit<Started, "status">, timeoutSec: number, 
   }
   e.io.out("");
   e.io.out(`Report: ${run.reportUrl}`);
-  if (s.cost_capped) e.io.out("The analysis reached its cost limit, so the report covers a sample of these sessions.");
+  if (s.cost_capped) e.io.out("The analyzer hit today's analysis limit partway through, so parts of the report may be missing. Run again tomorrow for a full report.");
   if (recs) printSummary(e, recs);
   e.io.out(`Run id: ${run.runId}  (for status, share, feedback)`);
   return finish(e, s, run.runId);
