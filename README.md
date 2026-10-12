@@ -75,9 +75,10 @@ CLI's name and version.
   JWTs, authorization and cookie headers, passwords in URLs and on command lines, and values
   under names like `password`, `secret`, `token` or `api_key`;
 - personal data in known formats: email addresses, phone numbers written as phone numbers
-  (`+44 20 7946 0958`, `(415) 555-0132`), payment card numbers, IBANs, US Social Security
-  numbers, UK National Insurance and Canadian SIN numbers, and IP addresses outside private
-  ranges. Card, bank and ID numbers must also pass their checksum;
+  (`+44 20 7946 0958`, `(415) 555-0132`) and Indian mobile numbers, payment card numbers
+  (including RuPay), IBANs, UPI IDs, US Social Security numbers, Aadhaar and PAN numbers, UK
+  National Insurance and Canadian SIN numbers, and IP addresses outside private ranges. Card,
+  bank and ID numbers must also pass their checksum;
 - every value in `.env` files Claude read or wrote;
 - images and long base64 data;
 - the full copies of files Claude Code keeps from before each edit;

@@ -210,13 +210,14 @@ const COUNT_LABELS: Record<string, [string, string]> = {
   iban: ["IBAN", "IBANs"],
   ssn: ["Social Security number", "Social Security numbers"],
   "national-id": ["national ID number", "national ID numbers"],
+  "upi-id": ["UPI ID", "UPI IDs"],
   "ip-address": ["IP address", "IP addresses"],
 };
 
 function redactionLine(meta: PreviewMeta): string {
   const named = Object.entries(meta.counts).filter(([id]) => COUNT_LABELS[id]);
   const other = Object.entries(meta.counts)
-    .filter(([id]) => !COUNT_LABELS[id] && id !== "home-path" && !id.startsWith("unparsable"))
+    .filter(([id]) => !COUNT_LABELS[id] && id !== "home-path" && id !== "username" && !id.startsWith("unparsable"))
     .reduce((a, [, n]) => a + n, 0);
   const parts = named.sort(([, a], [, b]) => b - a).map(([id, n]) => `${n} ${COUNT_LABELS[id]?.[n === 1 ? 0 : 1]}`);
   if (other) parts.push(`${other} other secret${other === 1 ? "" : "s"} or blobs`);

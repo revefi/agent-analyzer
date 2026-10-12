@@ -245,9 +245,11 @@ const RULE_LABELS: Record<string, string> = {
   "card-number": "Payment card numbers",
   iban: "Bank account numbers (IBAN)",
   ssn: "US Social Security numbers",
-  "national-id": "UK National Insurance and Canadian SIN numbers",
+  "national-id": "National ID and tax numbers (Aadhaar, PAN, UK NI, Canadian SIN)",
+  "upi-id": "UPI payment IDs",
   "ip-address": "IP addresses outside private ranges",
   "home-path": "Your home folder path (shown as ~)",
+  username: "Your username elsewhere, like build caches and folder names (shown as {USER})",
   "unparsable-line": "Incomplete lines (dropped)",
   "unparsable-file": "Unreadable metadata files (emptied)",
 };
@@ -275,9 +277,9 @@ export function renderReport(meta: PreviewMeta): string {
     "## Sent as written",
     "",
     "Your prompts, Claude's replies, the commands it ran, and the code and file contents that appear " +
-      "in these sessions are uploaded as they are. Redaction removes the known secret formats listed " +
-      "below; it cannot recognise every kind of sensitive text. Read through the files if a session " +
-      "touched something you would not share.",
+      "in these sessions are uploaded as they are. Redaction removes the known secret and " +
+      "personal-data formats listed below; it cannot recognise every kind of sensitive text. Read " +
+      "through the files if a session touched something you would not share.",
     "",
     "## Removed on this machine",
     "",
