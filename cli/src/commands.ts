@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, openAsBlob } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -16,6 +16,7 @@ import {
   type Recommendations,
   type RunStatus,
 } from "./api.js";
+import { Auth, type PendingLogin } from "./auth.js";
 import { collect, defaultProjectsDir, utcToday } from "./collect.js";
 import { buildManifest, LIMITS, limitProblem, pack } from "./pack.js";
 import { humanSize, type PreviewMeta, readPreview, REPORT_FILE, writePreview } from "./preview.js";
@@ -35,6 +36,8 @@ export interface Env {
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   configDir?: string;
+  /** Opens a URL in the user's browser; defaults to the platform's opener. */
+  openUrl?: (url: string) => void;
 }
 
 /** Wrong flags or arguments: shown with the usage text, exit code 2. */
@@ -104,6 +107,34 @@ function machineDir(e: Env, base: string): string {
   const root = e.configDir ?? configDir(e.env);
   const host = new URL(base).host;
   return host === new URL(DEFAULT_API).host ? root : join(root, "servers", host.replace(/[^\w.-]/g, "_"));
+}
+
+const loginCommand = (api?: string) => `revefi-agent-analyzer login${api ? ` --api ${quote(api)}` : ""}`;
+
+function auth(e: Env, api?: string): Auth {
+  const base = apiBase(e, api);
+  return new Auth({ base, dir: machineDir(e, base), fetch: e.fetch, sleep: e.sleep, env: e.env, loginCommand: loginCommand(api) });
+}
+
+/** Opens the sign-in page without a shell, so the URL is never interpreted as a command. */
+function openInBrowser(url: string): void {
+  // Over SSH with no display, xdg-open can start a text browser nobody sees.
+  if (process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return;
+  const [cmd, args] =
+    process.platform === "darwin"
+      ? ["open", [url]]
+      : process.platform === "win32"
+        ? ["rundll32", ["url.dll,FileProtocolHandler", url]]
+        : ["xdg-open", [url]];
+  const child = spawn(cmd, args, { stdio: "ignore", detached: true, windowsHide: true });
+  // The printed link is the fallback, so a missing opener is not an error.
+  child.on("error", () => undefined);
+  child.unref();
+}
+
+function describeLogin(e: Env, p: PendingLogin): void {
+  e.io.err(`Open this link to sign in with Google:\n  ${p.verification_uri_complete}`);
+  e.io.err(`Check that the page shows the code ${p.user_code}, then approve it.`);
 }
 
 async function client(e: Env, api?: string): Promise<Client> {
@@ -344,6 +375,66 @@ async function follow(e: Env, run: Omit<Started, "status">, timeoutSec: number, 
 }
 
 export const COMMANDS: Record<string, { summary: string; run: (args: string[], e: Env) => Promise<number> }> = {
+  login: {
+    summary: "Sign in with Google (--start and --wait split it in two, for scripts)",
+    async run(args, e) {
+      const { values } = parse(args, {
+        ...API_OPTION,
+        start: { type: "boolean" },
+        wait: { type: "boolean" },
+        json: { type: "boolean" },
+        "no-browser": { type: "boolean" },
+        timeout: { type: "string" },
+      });
+      if (values.start && values.wait) throw new UsageError("Use --start or --wait, not both.");
+      const a = auth(e, values.api);
+      if (!values.wait) {
+        const pending = await a.startLogin();
+        if (values.start) {
+          if (values.json) {
+            e.io.out(
+              JSON.stringify({
+                verification_uri_complete: pending.verification_uri_complete,
+                user_code: pending.user_code,
+                expires_in: Math.round((pending.expires_at - Date.now()) / 1000),
+              }),
+            );
+          } else {
+            describeLogin(e, pending);
+            e.io.err(`Then run: ${loginCommand(values.api)} --wait`);
+          }
+          return 0;
+        }
+        describeLogin(e, pending);
+        if (e.isTTY && !values["no-browser"]) (e.openUrl ?? openInBrowser)(pending.verification_uri_complete);
+      }
+      const timeout = values.timeout === undefined ? undefined : wholeNumber(values.timeout, "--timeout", 0, 1) * 1000;
+      const { email } = await a.finishLogin({ timeoutMs: timeout });
+      if (values.json) e.io.out(JSON.stringify({ email }));
+      else e.io.out(email ? `Signed in as ${email}.` : "Signed in.");
+      return 0;
+    },
+  },
+  logout: {
+    summary: "Sign out on this computer",
+    async run(args, e) {
+      const { values } = parse(args, API_OPTION);
+      const { signedIn, revoked } = await auth(e, values.api).logout();
+      if (!signedIn) e.io.out("You weren't signed in.");
+      else if (revoked) e.io.out("Signed out.");
+      else e.io.out("Signed out on this computer. The session couldn't be ended on the server; it expires on its own.");
+      return 0;
+    },
+  },
+  whoami: {
+    summary: "Show who you're signed in as",
+    async run(args, e) {
+      const { values } = parse(args, { ...API_OPTION, json: { type: "boolean" } });
+      const email = await auth(e, values.api).email();
+      e.io.out(values.json ? JSON.stringify({ email }) : email ? `Signed in as ${email}.` : "Signed in (email unavailable).");
+      return 0;
+    },
+  },
   analyze: {
     summary: "Collect, redact, preview, upload and wait for the report (asks before uploading)",
     async run(args, e) {

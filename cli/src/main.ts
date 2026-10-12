@@ -1,5 +1,6 @@
 import { parseArgs } from "node:util";
 import { ApiError, ISSUES_URL } from "./api.js";
+import { SignInError } from "./auth.js";
 import { askYesNo, COMMANDS, type Env, type Io, UsageError, UserError } from "./commands.js";
 import { PreviewError } from "./preview.js";
 
@@ -22,13 +23,20 @@ Options for analyze and prepare:
   --all-projects         Every project on this machine, not just this repository
   --exclude-session ID   Leave a session out (repeatable; a prefix of the id is enough)
 
+Options for login:
+  --start                Print the sign-in link and code, then exit (--json for a script)
+  --wait                 Wait for a started sign-in to be approved
+  --no-browser           Don't open the browser; just print the link
+
 Other options:
   -y, --yes              Don't ask before uploading (analyze, upload) or deleting (delete-my-data)
-  --json                 One JSON object on stdout (prepare, upload, status, recommendations);
+  --json                 One JSON object on stdout (login, whoami, prepare, upload, status,
+                         recommendations);
                          progress and messages go to stderr; errors print {"error": ...}
   --wait                 status: follow the run until it finishes
   --no-wait              upload: return as soon as the analysis has started
-  --timeout SECONDS      How long to wait for the report (analyze 1800, upload and status 480)
+  --timeout SECONDS      How long to wait for the report (analyze 1800, upload and status 480),
+                         or for login to be approved (default: until the code expires)
   --api URL              Analyzer server (default REVEFI_ANALYZER_API, else analyzer.revefi.com)
   -h, --help             Show this help
   -v, --version          Show the version
@@ -53,10 +61,11 @@ export function defaultEnv(io: Io = consoleIo): Env {
   };
 }
 
-type ErrorKind = "usage" | "refused" | "server" | "unexpected";
+type ErrorKind = "usage" | "sign_in" | "refused" | "server" | "unexpected";
 
 function classify(err: unknown, debug: boolean): { kind: ErrorKind; message: string; status?: number } {
   if (err instanceof UsageError) return { kind: "usage", message: err.message };
+  if (err instanceof SignInError) return { kind: "sign_in", message: err.message };
   if (err instanceof ApiError) return { kind: "server", message: err.message, status: err.status };
   if (err instanceof UserError || err instanceof PreviewError) return { kind: "refused", message: err.message };
   const e = err as Error;

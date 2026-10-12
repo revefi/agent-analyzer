@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { unreachable } from "./net.js";
 import type { Manifest } from "./pack.js";
 
 export const DEFAULT_API = "https://analyzer.revefi.com";
@@ -153,14 +154,7 @@ export class Client {
     try {
       return await this.fetch(url, init);
     } catch (err) {
-      const e = err as Error & { cause?: { code?: string; message?: string } };
-      if (e.name === "TimeoutError") {
-        throw new ApiError(`${host} didn't respond in time. Try again in a few minutes.`);
-      }
-      const why = e.cause?.code ?? e.cause?.message ?? e.message;
-      const proxied = (this.env.HTTPS_PROXY || this.env.https_proxy) && !this.env.NODE_USE_ENV_PROXY;
-      const hint = proxied ? " You have HTTPS_PROXY set; Node uses it only when NODE_USE_ENV_PROXY=1 is also set." : "";
-      throw new ApiError(`Couldn't reach ${host} (${why}). Check your connection and try again.${hint}`);
+      throw new ApiError(unreachable(err, host, this.env));
     }
   }
 
