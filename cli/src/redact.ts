@@ -353,11 +353,10 @@ export function redactValue(
   const env = envFile || aboutEnvFile(obj);
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(obj)) {
+    // Claude Code's structured duplicate of the tool_result in `message`; the analyzer reads only that one.
+    if (k === "toolUseResult") continue;
     const key = scrubText(k, counts, home);
-    if (k === "originalFile" && typeof v === "string") {
-      bump(counts, "original-file");
-      out[key] = "<file omitted>";
-    } else if (
+    if (
       SECRET_KEY.test(k) &&
       (typeof v === "string" || typeof v === "number") &&
       !String(v).startsWith("<")
