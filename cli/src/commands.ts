@@ -16,7 +16,7 @@ import {
   type RunStatus,
   type Sharing,
 } from "./api.js";
-import { Auth, type PendingLogin, SignInError } from "./auth.js";
+import { Auth, canonicalHost, type PendingLogin, SignInError } from "./auth.js";
 import { collect, defaultProjectsDir, utcToday } from "./collect.js";
 import { buildManifest, LIMITS, limitProblem, pack } from "./pack.js";
 import { applyErrorPicks, parsePicks } from "./errorpick.js";
@@ -239,7 +239,7 @@ async function checkHost(dir: string, base: string): Promise<void> {
   const file = join(dir, UPLOAD_TO);
   const recorded = existsSync(file) ? (await readFile(file, "utf8")).trim() : "";
   const host = new URL(base).host;
-  if (recorded && recorded !== host) {
+  if (recorded && canonicalHost(recorded) !== canonicalHost(host)) {
     throw new UserError(`This preview was prepared for ${recorded}, not ${host}. Run \`prepare\` again for ${host}, or pass --api for ${recorded}.`);
   }
 }

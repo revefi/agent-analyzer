@@ -4,7 +4,7 @@ import { SignInError } from "./auth.js";
 import { unreachable } from "./net.js";
 import type { Manifest } from "./pack.js";
 
-export const DEFAULT_API = "https://analyzer.revefi.com";
+export const DEFAULT_API = "https://optimizer.revefi.com";
 export const ISSUES_URL = "https://github.com/revefi/agent-analyzer/issues";
 
 export type Phase = "uploading" | "analyzing" | "finishing" | "done" | "failed" | "deferred";
