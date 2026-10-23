@@ -61,12 +61,13 @@ upload, already redacted, in `.revefi/upload-preview/<timestamp>/` inside your r
 `REDACTION_REPORT.md` that lists every session and everything that was removed. The `.revefi/`
 folder ignores itself in git.
 
-**What is sent:** the transcripts of the Claude Code sessions that started in the window you
-chose (7 days by default), for this repository only unless you pass `--all-projects`. That
-includes your prompts, Claude's replies, the commands it ran with their output, and code and
-file contents that appeared in those sessions. Subagent transcripts of those sessions are
-included. A small summary goes with them: the dates, the session count, the sizes, and the
-CLI's name and version.
+**What is sent:** the transcripts of the Claude Code sessions that started in the window you chose
+(7 days by default), for this repository only unless you pass `--all-projects`. That includes your
+prompts, Claude's replies, the commands and other tools Claude ran, and the code it wrote. The
+output of those tools is not sent. When a tool call failed, only its error message goes: a few
+lines picked from the output (at most 6 lines and 500 characters), redacted like the rest. Subagent
+transcripts of those sessions are included. A small summary goes with them: the dates, the session
+count, the sizes, and the CLI's name and version.
 
 **What is removed first:**
 
@@ -81,9 +82,9 @@ CLI's name and version.
   bank and ID numbers must also pass their checksum;
 - every value in `.env` files Claude read or wrote;
 - images and long base64 data;
-- the second, structured copy of each tool's output that Claude Code keeps next to the
-  transcript (`toolUseResult`), including the full copies of files from before each edit. The
-  output itself is still sent once, in the transcript;
+- every tool's output except the error message of a failed call, both in the transcript and in
+  the structured copy Claude Code keeps next to it (`toolUseResult`), including file contents
+  Claude read and copies of files from before each edit;
 - your home folder path, which becomes `~` (also in project folder names).
 
 **What is never sent:** tool output Claude Code saves outside the transcripts (`tool-results/`),

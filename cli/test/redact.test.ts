@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { validateLuhn, validateVerhoeff } from "../src/pii.js";
-import { aliasProjectDir, type Counts, redactJson, redactJsonl, redactLine, scrubText } from "../src/redact.js";
+import { aliasProjectDir, type Counts, errorMessage, redactJson, redactJsonl, redactLine, scrubText } from "../src/redact.js";
 
 // Fake secrets are assembled at runtime so no secret-shaped literal sits in the repo.
 const j = (...parts: string[]) => parts.join("");
@@ -378,9 +378,9 @@ describe("scrubText: personal data", () => {
 });
 
 describe("redactLine", () => {
-  it("redacts personal data inside a JSON-encoded tool result and keeps valid JSON", () => {
+  it("redacts personal data inside JSON quoted in a message and keeps valid JSON", () => {
     const inner = JSON.stringify({ user: { email: "jane@corp.io", phone: "+91 98765 43210" } });
-    const line = JSON.stringify({ message: { content: [{ type: "tool_result", content: `cat user.json\n${inner}` }] } });
+    const line = JSON.stringify({ message: { content: [{ type: "text", text: `user.json has\n${inner}` }] } });
     const counts: Counts = {};
     const out = redactLine(line, counts) ?? "";
     expect(() => JSON.parse(out)).not.toThrow();
@@ -407,23 +407,20 @@ describe("redactLine", () => {
     expect(scrub(text).text).not.toContain("abcd1234");
   });
 
-  it("masks .env values when Claude read or wrote a .env file", () => {
-    const read = JSON.stringify({
-      message: { content: [{ type: "tool_result", content: "     1→PORT=8080\n     2→MODE=prod" }] },
-      toolUseResult: { type: "text", file: { filePath: "/repo/.env.local", content: "PORT=8080\nMODE=prod" } },
+  it("masks .env values when Claude wrote a .env file", () => {
+    const write = JSON.stringify({
+      message: { content: [{ type: "tool_use", input: { file_path: "/repo/.env", content: "PORT=8080\nMODE=prod" } }] },
     });
-    const write = JSON.stringify({ message: { content: [{ type: "tool_use", input: { file_path: "/repo/.env", content: "MODE=prod" } }] } });
-    const counts: Counts = {};
-    const out = `${redactLine(read, counts)}${redactLine(write, counts)}`;
+    const out = redactLine(write, {}) ?? "";
     expect(out).not.toMatch(/8080|=prod/);
     expect(out).toContain("PORT=<REDACTED>");
   });
 
-  it("scrubs a secret nested inside a JSON-encoded tool result and keeps valid JSON", () => {
+  it("scrubs a secret nested inside JSON quoted in a message and keeps valid JSON", () => {
     const inner = JSON.stringify({ config: { token: j("abcd", "efgh1234") } });
     const line = JSON.stringify({
-      type: "user",
-      message: { content: [{ type: "tool_result", content: `cat config.json\n${inner}` }] },
+      type: "assistant",
+      message: { content: [{ type: "text", text: `config.json has\n${inner}` }] },
     });
     const counts: Counts = {};
     const out = redactLine(line, counts);
@@ -443,17 +440,81 @@ describe("redactLine", () => {
     expect(counts).toEqual({ image: 1 });
   });
 
-  it("drops the structured duplicate of a tool's output and keeps the tool_result", () => {
+  it("drops a successful tool's output and its structured duplicate; a failure keeps its message", () => {
     const line = JSON.stringify({
       type: "user",
-      message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "edited a.ts" }] },
+      message: {
+        content: [
+          { type: "tool_result", tool_use_id: "t1", content: "const a = 1;\n" },
+          { type: "tool_result", tool_use_id: "t2", is_error: true, content: [{ type: "text", text: "Error: boom" }] },
+        ],
+      },
       toolUseResult: { filePath: "/tmp/a.ts", originalFile: "const a = 1;\n", structuredPatch: [] },
     });
     const counts: Counts = {};
     const parsed = JSON.parse(redactLine(line, counts) ?? "");
     expect(parsed).not.toHaveProperty("toolUseResult");
-    expect(parsed.message.content[0]).toEqual({ type: "tool_result", tool_use_id: "t1", content: "edited a.ts" });
+    expect(parsed.message.content).toEqual([
+      { type: "tool_result", tool_use_id: "t1", content: "" },
+      { type: "tool_result", tool_use_id: "t2", is_error: true, content: "Error: boom" },
+    ]);
     expect(counts).toEqual({});
+  });
+
+  it("sends only the error lines of a long failed output, redacted", () => {
+    const output = [
+      "Exit code 1",
+      ...Array.from({ length: 400 }, (_, i) => `PASS tests/case_${i}.py`),
+      "Traceback (most recent call last):",
+      '  File "app.py", line 3, in <module>',
+      `ValueError: bad token ${j("ghp_", x(36, "A"))}`,
+      "FAILED tests/test_app.py::test_load - ValueError",
+      "1 failed, 400 passed in 3.2s",
+    ].join("\n");
+    const line = JSON.stringify({ message: { content: [{ type: "tool_result", tool_use_id: "t1", is_error: true, content: output }] } });
+    const counts: Counts = {};
+    const sent = JSON.parse(redactLine(line, counts) ?? "").message.content[0].content as string;
+    expect(sent.split("\n")).toEqual([
+      "Exit code 1",
+      "Traceback (most recent call last):",
+      "ValueError: bad token <GITHUB_TOKEN>",
+      "FAILED tests/test_app.py::test_load - ValueError",
+      "1 failed, 400 passed in 3.2s",
+    ]);
+    expect(counts["github-token"]).toBe(1);
+  });
+
+  it("redacts a secret that straddles the line and message cuts", () => {
+    const token = j("ghp_", x(36, "Q"));
+    const ansiToken = `\x1b[31m${token}\x1b[0m`;
+    const output = [
+      "Exit code 1",
+      `Error: ${"a".repeat(185)} ${token} tail`,
+      `Error: ${"b".repeat(150)}`,
+      `Error: ${"c".repeat(150)} ${ansiToken}`,
+      `FAILED ${"d".repeat(150)}`,
+      `done ${token}`,
+    ].join("\n");
+    const line = JSON.stringify({ message: { content: [{ type: "tool_result", tool_use_id: "t1", is_error: true, content: output }] } });
+    const sent = JSON.parse(redactLine(line, {}) ?? "").message.content[0].content as string;
+    expect(sent).not.toContain("ghp_Q");
+    expect(sent).not.toMatch(/Q{8}/);
+  });
+
+  it("caps an error message at 6 lines and 500 characters", () => {
+    const long = Array.from({ length: 20 }, (_, i) => `Error: ${"x".repeat(300)} ${i}`).join("\n");
+    const msg = errorMessage(long);
+    expect(msg.split("\n").length).toBeLessThanOrEqual(6);
+    expect(msg.length).toBeLessThanOrEqual(501);
+    expect(errorMessage("\n\n")).toBe("");
+  });
+
+  it("keeps the interruption marker of an interrupted tool call", () => {
+    const line = JSON.stringify({
+      message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "[Request interrupted by user for tool use]" }] },
+    });
+    const parsed = JSON.parse(redactLine(line, {}) ?? "");
+    expect(parsed.message.content[0].content).toBe("[Request interrupted");
   });
 
   it("drops a torn line instead of uploading it unscrubbed", () => {

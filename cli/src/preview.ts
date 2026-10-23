@@ -275,10 +275,11 @@ export function renderReport(meta: PreviewMeta): string {
     "",
     "## Sent as written",
     "",
-    "Your prompts, Claude's replies, the commands it ran, and the code and file contents that appear " +
-      "in these sessions are uploaded as they are. Redaction removes the known secret and " +
-      "personal-data formats listed below; it cannot recognise every kind of sensitive text. Read " +
-      "through the files if a session touched something you would not share.",
+    "Your prompts, Claude's replies, the commands it ran and the code it wrote are uploaded as they " +
+      "are. The output of tools is not: a call that failed keeps only its error message, a few lines " +
+      "at most. Redaction removes the known secret and personal-data formats listed below; it cannot " +
+      "recognise every kind of sensitive text. Read through the files if a session touched something " +
+      "you would not share.",
     "",
     "## Removed on this machine",
     "",

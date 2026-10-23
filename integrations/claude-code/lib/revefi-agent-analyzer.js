@@ -4261,6 +4261,29 @@ function aliasProjectDir(project, home) {
 function escapeRe(s3) {
   return s3.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+var INTERRUPT_MARKER = "[Request interrupted";
+var ERROR_LINE = /^HTTP\/?\s?[45]\d\d|\b[45]\d\d Bad Gateway|^Traceback \(most recent call last\)|^\s*(?:Error|ERROR|FAILED|fatal|error)(?::|\[)|^(?:FAILED|ERROR) |command not found|No such file or directory|^[\w.]*(?:Error|Exception)\b:/;
+var ERROR_WORDS = /\b(?:errors?|failed|failure|exception|exceeded|timed? ?out|timeout|cannot|can't|could not|unable to|denied|not found|invalid|unexpected|refused)\b/i;
+var ANSI = /\x1b\[[0-9;]*[A-Za-z]/g;
+var ERROR_MAX_LINES = 6;
+var ERROR_LINE_CHARS = 200;
+var ERROR_CHARS = 500;
+function errorMessage(output) {
+  const lines = output.replace(ANSI, "").split("\n").map((l) => l.trimEnd()).filter((l) => l.trim() !== "");
+  if (!lines.length) return "";
+  const last = lines.length - 1;
+  const formatted = lines.flatMap((l, i) => i > 0 && i < last && ERROR_LINE.test(l) ? [i] : []);
+  const worded = lines.flatMap((l, i) => i > 0 && i < last && ERROR_WORDS.test(l) ? [i] : []);
+  const middle = [.../* @__PURE__ */ new Set([...formatted, ...worded])].slice(0, ERROR_MAX_LINES - 2);
+  const kept = [.../* @__PURE__ */ new Set([0, ...middle, last])].sort((a, b2) => a - b2).map((i) => lines[i] ?? "").map((l) => l.length > ERROR_LINE_CHARS ? `${l.slice(0, ERROR_LINE_CHARS)}\u2026` : l);
+  const message = kept.join("\n");
+  return message.length > ERROR_CHARS ? `${message.slice(0, ERROR_CHARS)}\u2026` : message;
+}
+function outputText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((b2) => b2 && typeof b2 === "object" && typeof b2.text === "string" ? b2.text : "").filter(Boolean).join("\n");
+}
 function isImageBlock(v2) {
   const src = v2.source;
   return v2.type === "image" && typeof src === "object" && src !== null && typeof src.data === "string";
@@ -4275,12 +4298,23 @@ function aboutEnvFile(obj) {
   const result = obj.toolUseResult;
   return namesEnvFile(obj) || namesEnvFile(result) || namesEnvFile(result?.file);
 }
+function withoutOutput(block, counts, home, envFile) {
+  const { content, ...rest } = block;
+  const text = outputText(content);
+  const out = {};
+  for (const [k2, v2] of Object.entries(rest)) out[k2] = redactValue(v2, counts, home, envFile);
+  if (text.startsWith(INTERRUPT_MARKER)) out.content = INTERRUPT_MARKER;
+  else if (block.is_error === true) out.content = errorMessage(scrubText(text.replace(ANSI, ""), counts, home, envFile));
+  else out.content = "";
+  return out;
+}
 function redactValue(value, counts, home, envFile = false) {
   if (typeof value === "string") return scrubText(value, counts, home, envFile);
   if (Array.isArray(value))
     return value.map((v2) => redactValue(v2, counts, home, envFile));
   if (typeof value !== "object" || value === null) return value;
   const obj = value;
+  if (obj.type === "tool_result") return withoutOutput(obj, counts, home, envFile);
   if (isImageBlock(obj)) {
     bump(counts, "image");
     const source = obj.source;
@@ -4516,7 +4550,7 @@ function renderReport(meta) {
     "",
     "## Sent as written",
     "",
-    "Your prompts, Claude's replies, the commands it ran, and the code and file contents that appear in these sessions are uploaded as they are. Redaction removes the known secret and personal-data formats listed below; it cannot recognise every kind of sensitive text. Read through the files if a session touched something you would not share.",
+    "Your prompts, Claude's replies, the commands it ran and the code it wrote are uploaded as they are. The output of tools is not: a call that failed keeps only its error message, a few lines at most. Redaction removes the known secret and personal-data formats listed below; it cannot recognise every kind of sensitive text. Read through the files if a session touched something you would not share.",
     "",
     "## Removed on this machine",
     "",
@@ -5126,7 +5160,7 @@ async function askYesNo(question) {
 }
 
 // cli/src/main.ts
-var VERSION = true ? "0.2.0" : "0.0.0-dev";
+var VERSION = true ? "0.3.0" : "0.0.0-dev";
 var USAGE = `Usage: revefi-agent-analyzer <command> [options]
 
 Find repeated work and wasted spend in your Claude Code sessions.
