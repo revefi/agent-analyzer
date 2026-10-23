@@ -81,7 +81,9 @@ CLI's name and version.
   bank and ID numbers must also pass their checksum;
 - every value in `.env` files Claude read or wrote;
 - images and long base64 data;
-- the full copies of files Claude Code keeps from before each edit;
+- the second, structured copy of each tool's output that Claude Code keeps next to the
+  transcript (`toolUseResult`), including the full copies of files from before each edit. The
+  output itself is still sent once, in the transcript;
 - your home folder path, which becomes `~` (also in project folder names).
 
 **What is never sent:** tool output Claude Code saves outside the transcripts (`tool-results/`),

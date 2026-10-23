@@ -239,7 +239,6 @@ const RULE_LABELS: Record<string, string> = {
   "env-file": ".env file bodies (every value masked)",
   "base64-blob": "Long base64 blobs",
   image: "Images",
-  "original-file": "Full copies of edited files",
   email: "Email addresses",
   phone: "Phone numbers",
   "card-number": "Payment card numbers",

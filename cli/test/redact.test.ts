@@ -433,17 +433,27 @@ describe("redactLine", () => {
     expect(counts["secret-assignment"]).toBe(1);
   });
 
-  it("strips image data and whole-file copies but keeps the record's shape", () => {
+  it("strips image data but keeps the record's shape", () => {
     const line = JSON.stringify({
       message: { content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0K" } }] },
-      toolUseResult: { filePath: "/tmp/a.ts", originalFile: "const a = 1;\n", structuredPatch: [] },
     });
     const counts: Counts = {};
     const parsed = JSON.parse(redactLine(line, counts) ?? "");
     expect(parsed.message.content[0].source).toEqual({ type: "base64", media_type: "image/png", data: "<image omitted>" });
-    expect(parsed.toolUseResult.originalFile).toBe("<file omitted>");
-    expect(parsed.toolUseResult.filePath).toBe("/tmp/a.ts");
-    expect(counts).toEqual({ image: 1, "original-file": 1 });
+    expect(counts).toEqual({ image: 1 });
+  });
+
+  it("drops the structured duplicate of a tool's output and keeps the tool_result", () => {
+    const line = JSON.stringify({
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "edited a.ts" }] },
+      toolUseResult: { filePath: "/tmp/a.ts", originalFile: "const a = 1;\n", structuredPatch: [] },
+    });
+    const counts: Counts = {};
+    const parsed = JSON.parse(redactLine(line, counts) ?? "");
+    expect(parsed).not.toHaveProperty("toolUseResult");
+    expect(parsed.message.content[0]).toEqual({ type: "tool_result", tool_use_id: "t1", content: "edited a.ts" });
+    expect(counts).toEqual({});
   });
 
   it("drops a torn line instead of uploading it unscrubbed", () => {

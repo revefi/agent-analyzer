@@ -4289,11 +4289,9 @@ function redactValue(value, counts, home, envFile = false) {
   const env = envFile || aboutEnvFile(obj);
   const out = {};
   for (const [k2, v2] of Object.entries(obj)) {
+    if (k2 === "toolUseResult") continue;
     const key = scrubText(k2, counts, home);
-    if (k2 === "originalFile" && typeof v2 === "string") {
-      bump(counts, "original-file");
-      out[key] = "<file omitted>";
-    } else if (SECRET_KEY.test(k2) && (typeof v2 === "string" || typeof v2 === "number") && !String(v2).startsWith("<")) {
+    if (SECRET_KEY.test(k2) && (typeof v2 === "string" || typeof v2 === "number") && !String(v2).startsWith("<")) {
       bump(counts, "secret-key");
       out[key] = "<REDACTED>";
     } else {
@@ -4492,7 +4490,6 @@ var RULE_LABELS = {
   "env-file": ".env file bodies (every value masked)",
   "base64-blob": "Long base64 blobs",
   image: "Images",
-  "original-file": "Full copies of edited files",
   email: "Email addresses",
   phone: "Phone numbers",
   "card-number": "Payment card numbers",
@@ -5129,7 +5126,7 @@ async function askYesNo(question) {
 }
 
 // cli/src/main.ts
-var VERSION = true ? "0.1.0" : "0.0.0-dev";
+var VERSION = true ? "0.2.0" : "0.0.0-dev";
 var USAGE = `Usage: revefi-agent-analyzer <command> [options]
 
 Find repeated work and wasted spend in your Claude Code sessions.
