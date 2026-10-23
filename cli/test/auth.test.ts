@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, u
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { Auth, breakStaleLock, SignInError } from "../src/auth.js";
+import { Auth, breakStaleLock, canonicalHost, SignInError } from "../src/auth.js";
 import { fakeFetch, type Handler, json, type Seen } from "./fake-server.js";
 
 const tmp = mkdtempSync(join(tmpdir(), "aa-auth-"));
@@ -192,6 +192,20 @@ describe("Auth device login", () => {
     });
     await expect(auth.startLogin()).rejects.toThrow("api.test asked for a sign-in to a different server.");
     expect(seen).toHaveLength(1);
+  });
+
+  it("accepts the analyzer.revefi.com API from optimizer.revefi.com, its new name", async () => {
+    const { fetch } = fakeFetch({
+      "GET /api/auth/config": () => json(200, { ...CONFIG, audience: "https://analyzer.revefi.com/api" }),
+    });
+    const auth = new Auth({ base: "https://optimizer.revefi.com", dir: join(tmp, "renamed"), fetch });
+    await expect(auth.config()).resolves.toMatchObject({ audience: "https://analyzer.revefi.com/api" });
+  });
+
+  it("treats only the renamed prod host as an alias", () => {
+    expect(canonicalHost("analyzer.revefi.com")).toBe("optimizer.revefi.com");
+    expect(canonicalHost("dev-analyzer.revefi.com")).toBe("dev-analyzer.revefi.com");
+    expect(canonicalHost("api.test")).toBe("api.test");
   });
 
   it("refuses to wait without a started sign-in", async () => {

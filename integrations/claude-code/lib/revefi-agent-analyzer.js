@@ -53,9 +53,14 @@ function emailFrom(idToken) {
     return null;
   }
 }
+var SERVER_ALIASES = { "analyzer.revefi.com": "optimizer.revefi.com" };
+function canonicalHost(host) {
+  return SERVER_ALIASES[host] ?? host;
+}
 function sameOrigin(a, b2) {
   try {
-    return new URL(a).origin === new URL(b2).origin;
+    const [x, y] = [new URL(a), new URL(b2)];
+    return x.protocol === y.protocol && canonicalHost(x.host) === canonicalHost(y.host);
   } catch {
     return false;
   }
@@ -359,7 +364,7 @@ var Auth = class {
 };
 
 // cli/src/api.ts
-var DEFAULT_API = "https://analyzer.revefi.com";
+var DEFAULT_API = "https://optimizer.revefi.com";
 var ISSUES_URL = "https://github.com/revefi/agent-analyzer/issues";
 var FINAL_PHASES = ["done", "failed", "deferred"];
 var ApiError = class extends Error {
@@ -4908,7 +4913,7 @@ async function checkHost(dir, base) {
   const file = join7(dir, UPLOAD_TO);
   const recorded = existsSync(file) ? (await readFile4(file, "utf8")).trim() : "";
   const host = new URL(base).host;
-  if (recorded && recorded !== host) {
+  if (recorded && canonicalHost(recorded) !== canonicalHost(host)) {
     throw new UserError(`This preview was prepared for ${recorded}, not ${host}. Run \`prepare\` again for ${host}, or pass --api for ${recorded}.`);
   }
 }
@@ -5296,7 +5301,7 @@ async function askYesNo(question) {
 }
 
 // cli/src/main.ts
-var VERSION = true ? "0.4.0" : "0.0.0-dev";
+var VERSION = true ? "0.4.1" : "0.0.0-dev";
 var USAGE = `Usage: revefi-agent-analyzer <command> [options]
 
 Find repeated work and wasted spend in your Claude Code sessions.
@@ -5323,7 +5328,7 @@ Other options:
   --no-wait              upload: return as soon as the analysis has started
   --timeout SECONDS      How long to wait for the report (analyze 1800, upload and status 480),
                          or for login to be approved (default: until the code expires)
-  --api URL              Analyzer server (default REVEFI_ANALYZER_API, else analyzer.revefi.com)
+  --api URL              Analyzer server (default REVEFI_ANALYZER_API, else optimizer.revefi.com)
   -h, --help             Show this help
   -v, --version          Show the version
 

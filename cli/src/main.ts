@@ -37,7 +37,7 @@ Other options:
   --no-wait              upload: return as soon as the analysis has started
   --timeout SECONDS      How long to wait for the report (analyze 1800, upload and status 480),
                          or for login to be approved (default: until the code expires)
-  --api URL              Analyzer server (default REVEFI_ANALYZER_API, else analyzer.revefi.com)
+  --api URL              Analyzer server (default REVEFI_ANALYZER_API, else optimizer.revefi.com)
   -h, --help             Show this help
   -v, --version          Show the version
 

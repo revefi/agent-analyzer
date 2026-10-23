@@ -62,7 +62,7 @@ const REFUSALS = new Map([
 ]);
 
 export interface AuthOptions {
-  /** The analyzer server, e.g. https://analyzer.revefi.com. */
+  /** The analyzer server, e.g. https://optimizer.revefi.com. */
   base: string;
   /** Where this server's credentials live. */
   dir: string;
@@ -100,9 +100,18 @@ function emailFrom(idToken: string | undefined): string | null {
   }
 }
 
+// One server under two names: prod's Auth0 API kept the old host as its identifier.
+const SERVER_ALIASES: Readonly<Record<string, string>> = { "analyzer.revefi.com": "optimizer.revefi.com" };
+
+/** The host a server is known by, so its old name and its new one compare equal. */
+export function canonicalHost(host: string): string {
+  return SERVER_ALIASES[host] ?? host;
+}
+
 function sameOrigin(a: string, b: string): boolean {
   try {
-    return new URL(a).origin === new URL(b).origin;
+    const [x, y] = [new URL(a), new URL(b)];
+    return x.protocol === y.protocol && canonicalHost(x.host) === canonicalHost(y.host);
   } catch {
     return false; // An audience that isn't a URL can't belong to this server.
   }
