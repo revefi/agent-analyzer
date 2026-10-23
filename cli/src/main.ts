@@ -18,9 +18,10 @@ ${Object.entries(COMMANDS)
   .map(([name, c]) => `  ${name.padEnd(17)}${c.summary}`)
   .join("\n")}
 
-Options for analyze and prepare:
-  --days N               Days of history to analyze, 1-7 (default 7)
+Options for analyze, prepare and projects:
+  --days N               Days of history to analyze, 1-7 (default 7; projects takes only this)
   --all-projects         Every project on this machine, not just this repository
+  --project DIR          Sessions started in DIR or below it, instead of this repository
   --exclude-session ID   Leave a session out (repeatable; a prefix of the id is enough)
 
 Options for login:
@@ -30,8 +31,8 @@ Options for login:
 
 Other options:
   -y, --yes              Don't ask before uploading (analyze, upload) or deleting (delete-my-data)
-  --json                 One JSON object on stdout (login, whoami, prepare, upload, status,
-                         recommendations);
+  --json                 One JSON object on stdout (login, whoami, projects, prepare, upload,
+                         status, recommendations);
                          progress and messages go to stderr; errors print {"error": ...}
   --wait                 status: follow the run until it finishes
   --no-wait              upload: return as soon as the analysis has started

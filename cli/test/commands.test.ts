@@ -459,3 +459,87 @@ describe("sign-in", () => {
     expect((await run(["logout"], { srv: fakeFetch(AUTH0) })).out).toBe("You weren't signed in.");
   });
 });
+
+describe("choosing what to scan", () => {
+  const other = join(tmp, "other");
+  const sub = join(repo, "sub");
+  const addSession = (cwd: string, id: string) => {
+    const proj = join(claude, "projects", encodeProjectDir(cwd));
+    mkdirSync(proj, { recursive: true });
+    writeFileSync(join(proj, `${id}.jsonl`), `${JSON.stringify({ type: "user", cwd, timestamp: `${utcToday()}T00:00:02Z` })}\n`);
+  };
+  const ids = (out: string) => (JSON.parse(out) as { session_list: { id: string }[] }).session_list.map((s) => s.id).sort();
+
+  beforeEach(() => {
+    addSession(other, "s2");
+    addSession(sub, "s3");
+  });
+
+  type Totals = { path: string; sessions: number; bytes: number; last_day: string | null };
+  const listing = async (cwd = repo) =>
+    JSON.parse((await run(["projects", "--json"], { cwd })).out) as {
+      current_directory: Totals;
+      current_project: Totals;
+      all: { sessions: number };
+      projects: Totals[];
+    };
+
+  it("counts each folder the way --project scans it: the folder and everything below it", async () => {
+    const p = await listing();
+    const count = Object.fromEntries(p.projects.map((x) => [x.path, x.sessions]));
+    expect(count).toEqual({ [repo]: 2, [sub]: 1, [other]: 1 });
+    expect(p.current_project).toMatchObject({ path: repo, sessions: 2, last_day: utcToday() });
+    expect(p.current_directory).toMatchObject({ path: repo, sessions: 2 });
+    expect(p.all.sessions).toBe(3);
+    const bytes = p.projects.map((x) => x.bytes);
+    expect(bytes).toEqual([...bytes].sort((a, b) => b - a));
+  });
+
+  it("gives a folder with no sessions of its own the count of what is below it", async () => {
+    const empty = join(repo, "empty");
+    mkdirSync(join(empty, "deeper"), { recursive: true });
+    addSession(join(empty, "deeper"), "s4");
+    const p = await listing(empty);
+    expect(p.current_directory).toMatchObject({ path: empty, sessions: 1 });
+    expect(p.projects.some((x) => x.path === empty)).toBe(false);
+  });
+
+  it("reads where a session started even when the first timestamped record has no cwd", async () => {
+    const late = join(tmp, "late");
+    const proj = join(claude, "projects", encodeProjectDir(late));
+    mkdirSync(proj, { recursive: true });
+    const ts = `${utcToday()}T00:00:03Z`;
+    writeFileSync(
+      join(proj, "s5.jsonl"),
+      `${JSON.stringify({ type: "summary", timestamp: ts })}\n${JSON.stringify({ type: "user", cwd: late, timestamp: ts })}\n`,
+    );
+    expect((await listing()).projects.map((x) => x.path)).toContain(late);
+  });
+
+  it("scans only the folder given with --project, and below it", async () => {
+    expect(ids((await run(["prepare", "--json", "--project", other])).out)).toEqual(["s2"]);
+    expect(ids((await run(["prepare", "--json", "--project", sub])).out)).toEqual(["s3"]);
+    expect(JSON.parse((await run(["prepare", "--json", "--project", other])).out).scope).toBe(other);
+  });
+
+  it("still scans this repository and everything below it by default", async () => {
+    expect(ids((await run(["prepare", "--json"])).out)).toEqual(["s1", "s3"]);
+  });
+
+  it("resolves a relative --project against where the user is, and refuses an empty one", async () => {
+    expect(ids((await run(["prepare", "--json", "--project", "sub"])).out)).toEqual(["s3"]);
+    expect((await run(["prepare", "--json", "--project", ""])).code).toBe(2);
+  });
+
+  it("names the folder when --project finds nothing in it", async () => {
+    const r = await run(["prepare", "--json", "--project", join(tmp, "nowhere")]);
+    expect(r.code).toBe(1);
+    expect(JSON.parse(r.out).error.message).toMatch(/^No Claude Code sessions started in .+nowhere between .+ Run `revefi-agent-analyzer projects`/);
+  });
+
+  it("refuses --project together with --all-projects", async () => {
+    const r = await run(["prepare", "--json", "--project", other, "--all-projects"]);
+    expect(r.code).toBe(2);
+    expect(JSON.parse(r.out)).toEqual({ error: { kind: "usage", message: "Use --project or --all-projects, not both." } });
+  });
+});
