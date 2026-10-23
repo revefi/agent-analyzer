@@ -7,12 +7,22 @@ import { archivePath, type Session, type Window } from "./collect.js";
 import {
   aliasProjectDir,
   type Counts,
+  type ErrorCandidate,
   redactJson,
   redactLine,
 } from "./redact.js";
 
 export const PREVIEW_META = "preview.json";
 export const REPORT_FILE = "REDACTION_REPORT.md";
+/** Failed calls' redacted output, for picking error lines. Stays on this machine: never packed. */
+export const ERROR_CANDIDATES = "error-candidates.json";
+// More failures than this keep the fixed rule's lines; a model reads the rest.
+const MAX_CANDIDATES = 200;
+
+export interface FileErrorCandidate extends ErrorCandidate {
+  /** Archive path of the transcript that holds the call. */
+  file: string;
+}
 
 export interface PreviewSession {
   project: string;
@@ -29,6 +39,8 @@ export interface PreviewMeta {
   sessions: PreviewSession[];
   counts: Counts;
   bytes: number;
+  /** Failed tool calls, and how many had their error lines picked by a model instead of the fixed rule. */
+  error_messages?: { failed: number; picked_by_model: number };
 }
 
 export interface WritePreviewOptions {
@@ -50,6 +62,7 @@ async function redactJsonlFile(
   dst: string,
   counts: Counts,
   home?: string,
+  errors?: ErrorCandidate[],
 ): Promise<number> {
   let bytes = 0;
   await pipeline(
@@ -59,7 +72,7 @@ async function redactJsonlFile(
         input,
         crlfDelay: Infinity,
       })) {
-        const redacted = redactLine(line, counts, home);
+        const redacted = redactLine(line, counts, home, errors);
         if (redacted === undefined) continue;
         const chunk = `${redacted}\n`;
         bytes += Buffer.byteLength(chunk);
@@ -76,9 +89,10 @@ async function redactFile(
   dst: string,
   counts: Counts,
   home?: string,
+  errors?: ErrorCandidate[],
 ): Promise<number> {
   await mkdir(dirname(dst), { recursive: true, mode: 0o700 });
-  if (src.endsWith(".jsonl")) return redactJsonlFile(src, dst, counts, home);
+  if (src.endsWith(".jsonl")) return redactJsonlFile(src, dst, counts, home, errors);
   const body = redactJson(await readFile(src, "utf8"), counts, home);
   await writeFile(dst, body, { mode: 0o600 });
   return Buffer.byteLength(body);
@@ -103,18 +117,22 @@ async function previewSession(
   dir: string,
   s: Session,
   opts: WritePreviewOptions,
+  candidates: FileErrorCandidate[],
 ): Promise<PreviewSession> {
   const counts: Counts = {};
   const paths: string[] = [];
   let bytes = 0;
   for (const file of s.files) {
     const path = uploadPath(opts.projectsDir, file, opts.home);
+    const errors: ErrorCandidate[] = [];
     bytes += await redactFile(
       file,
       join(dir, ...path.split("/")),
       counts,
       opts.home,
+      errors,
     );
+    candidates.push(...errors.map((c) => ({ ...c, file: path })));
     paths.push(path);
   }
   return {
@@ -142,10 +160,12 @@ export async function writePreview(
       counts: {},
       bytes: 0,
     };
+    const candidates: FileErrorCandidate[] = [];
     for (const s of opts.sessions) {
       let ps: PreviewSession;
+      const found: FileErrorCandidate[] = [];
       try {
-        ps = await previewSession(dir, s, opts);
+        ps = await previewSession(dir, s, opts, found);
       } catch (err) {
         // Claude Code may have deleted the session since it was found; leave it out.
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
@@ -167,6 +187,15 @@ export async function writePreview(
       meta.sessions.push(ps);
       add(meta.counts, ps.counts);
       meta.bytes += ps.bytes;
+      candidates.push(...found);
+    }
+    if (candidates.length) {
+      meta.error_messages = { failed: candidates.length, picked_by_model: 0 };
+      await writeFile(
+        join(dir, ERROR_CANDIDATES),
+        `${JSON.stringify({ candidates: candidates.slice(0, MAX_CANDIDATES) })}\n`,
+        { mode: 0o600 },
+      );
     }
     await writeFile(
       join(dir, PREVIEW_META),
@@ -255,6 +284,14 @@ const RULE_LABELS: Record<string, string> = {
 
 const cell = (s: string) => s.replace(/[|`]/g, (c) => `\\${c}`);
 
+function errorMessagesLine({ failed, picked_by_model: picked }: { failed: number; picked_by_model: number }): string {
+  const calls = `${failed} tool call${failed === 1 ? "" : "s"} failed`;
+  const each = `${calls}. Each sends only its error message`;
+  if (!picked) return `${each}: a few lines picked by a fixed rule.`;
+  const haiku = "Claude Haiku in your Claude Code session chose which lines state the error";
+  return picked >= failed ? `${each}; ${haiku}.` : `${each}. For ${picked}, ${haiku}; the rest use a fixed rule.`;
+}
+
 export function renderReport(meta: PreviewMeta): string {
   const rows = Object.entries(meta.counts)
     .sort(([, a], [, b]) => b - a)
@@ -291,6 +328,7 @@ export function renderReport(meta: PreviewMeta): string {
     "",
     "Tool output that Claude Code saves outside the transcripts (`tool-results/`) is never uploaded.",
     "",
+    ...(meta.error_messages ? [errorMessagesLine(meta.error_messages), ""] : []),
     "## Sessions, largest first",
     "",
     "| Size | Started | Project | Session | Redactions |",

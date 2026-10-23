@@ -19,7 +19,8 @@ import {
 import { Auth, type PendingLogin, SignInError } from "./auth.js";
 import { collect, defaultProjectsDir, utcToday } from "./collect.js";
 import { buildManifest, LIMITS, limitProblem, pack } from "./pack.js";
-import { humanSize, type PreviewMeta, readPreview, REPORT_FILE, writePreview } from "./preview.js";
+import { applyErrorPicks, parsePicks } from "./errorpick.js";
+import { ERROR_CANDIDATES, humanSize, type PreviewMeta, readPreview, REPORT_FILE, writePreview } from "./preview.js";
 
 export interface Io {
   out: (s: string) => void;
@@ -505,6 +506,8 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
             bytes_before: p.sourceBytes,
             bytes_after: p.meta.bytes,
             redactions: p.meta.counts,
+            failed_tool_calls: p.meta.error_messages?.failed ?? 0,
+            error_candidates: p.meta.error_messages ? join(p.dir, ERROR_CANDIDATES) : null,
             upload_to: new URL(api).host,
           }),
         );
@@ -512,6 +515,21 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
         describePreview(e, p, api);
         e.io.out(`Upload it with: revefi-agent-analyzer upload ${quote(relative(e.cwd, p.dir))}`);
       }
+      return 0;
+    },
+  },
+  "pick-errors": {
+    summary: "Use the chosen lines as failed calls' error messages in a preview (the plugin's Haiku step)",
+    async run(args, e) {
+      const { values, positionals } = parse(args, { picks: { type: "string" }, json: { type: "boolean" } }, 1);
+      if (!values.picks) throw new UsageError("pick-errors needs --picks '<json>'.");
+      const r = await applyErrorPicks(resolve(e.cwd, positionals[0] ?? ""), parsePicks(values.picks));
+      e.io.out(
+        values.json
+          ? JSON.stringify(r)
+          : `Used the chosen lines for ${r.applied} error message${r.applied === 1 ? "" : "s"}` +
+              `${r.ignored.length ? `; ignored ${r.ignored.length}` : ""}.`,
+      );
       return 0;
     },
   },

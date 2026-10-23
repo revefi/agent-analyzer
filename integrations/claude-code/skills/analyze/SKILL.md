@@ -3,7 +3,7 @@ name: analyze
 description: Analyze this repository's recent Claude Code sessions with Revefi to find repeated work and wasted spend, then propose concrete fixes (skills, scripts, hooks, CLAUDE.md rules) and, if the user agrees, make them.
 argument-hint: "[all projects] [last N days] [skip session ID]"
 disable-model-invocation: true
-allowed-tools: Bash(revefi-agent-analyzer whoami *) Bash(revefi-agent-analyzer login *) Bash(revefi-agent-analyzer prepare *) Bash(revefi-agent-analyzer status *) Bash(revefi-agent-analyzer recommendations *)
+allowed-tools: Bash(revefi-agent-analyzer whoami *) Bash(revefi-agent-analyzer login *) Bash(revefi-agent-analyzer prepare *) Bash(revefi-agent-analyzer pick-errors *) Bash(revefi-agent-analyzer status *) Bash(revefi-agent-analyzer recommendations *)
 ---
 
 # Analyze Claude Code sessions with Revefi
@@ -64,7 +64,22 @@ revefi-agent-analyzer prepare --json <flags>
 
 The JSON has `preview_dir`, `report`, `scope`, `window`, `sessions`, `session_list` (id,
 project, day, bytes), `bytes_before`, `bytes_after`, `redactions` (counts by kind) and
-`upload_to` (the server it would go to).
+`upload_to` (the server it would go to), `failed_tool_calls`, and `error_candidates` (a local
+file, or null when no call failed).
+
+### Pick the error lines
+
+When `error_candidates` is not null, use the Agent tool with `subagent_type: "revefi:error-picker"`
+and pass it only this prompt: `Pick the error lines in <error_candidates>`. It answers with a JSON
+object of line numbers. Apply it, quoting the JSON in single quotes:
+
+```bash
+revefi-agent-analyzer pick-errors <preview_dir> --json --picks '<the JSON it returned>'
+```
+
+Don't read the candidates file yourself, and don't change the JSON. If the subagent fails, returns
+something that isn't that JSON, or `pick-errors` reports an error, skip this step: each failed
+call then keeps the few lines a fixed rule picked. Either way, carry on to consent.
 
 ## 2. Ask for consent, once
 
