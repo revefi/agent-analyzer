@@ -17,9 +17,10 @@ you before each one.
 /plugin install revefi@revefi
 ```
 
-Then, in any repository, run `/revefi:analyze`. You can say what to include, for example
-`/revefi:analyze last 3 days` or `/revefi:analyze all projects`. The first time, it asks you to
-sign in with Google or an emailed code.
+Then, in any repository, run `/revefi:analyze`. It asks which sessions to scan: this directory,
+this project, a project you name, or all projects. You can also say it up front, for example
+`/revefi:analyze last 3 days`, `/revefi:analyze all projects` or a project's name. The first
+time, it asks you to sign in with Google or an emailed code.
 
 The plugin runs the CLI with your installed Node.js, version 22.12 or newer. Plugins that ship
 executables are not installed by claude.ai or Cowork; use Claude Code in a terminal or an IDE.
@@ -62,13 +63,14 @@ upload, already redacted, in `.revefi/upload-preview/<timestamp>/` inside your r
 folder ignores itself in git.
 
 **What is sent:** the transcripts of the Claude Code sessions that started in the window you chose
-(7 days by default), for this repository only unless you pass `--all-projects`. That includes your
-prompts, Claude's replies, the commands and other tools Claude ran, and the code it wrote. The
-output of those tools is not sent. When a tool call failed, only its error message goes: a few
-lines picked from the output (at most 6 lines and 500 characters), redacted like the rest. In
-Claude Code, the plugin asks Claude Haiku, in your own session, which lines state the error;
-elsewhere a fixed rule picks them. Subagent transcripts of those sessions are included. A small
-summary goes with them: the dates, the session count, the sizes, and the CLI's name and version.
+(7 days by default), from the folders you chose: this repository by default, one folder with
+`--project`, or every project with `--all-projects`. That includes your prompts, Claude's replies,
+the commands and other tools Claude ran, and the code it wrote. The output of those tools is not
+sent. When a tool call failed, only its error message goes: a few lines picked from the output (at
+most 6 lines and 500 characters), redacted like the rest. In Claude Code, the plugin asks Claude
+Haiku, in your own session, which lines state the error; elsewhere a fixed rule picks them. Subagent
+transcripts of those sessions are included. A small summary goes with them: the dates, the session
+count, the sizes, and the CLI's name and version.
 
 **What is removed first:**
 
@@ -107,6 +109,7 @@ revefi-agent-analyzer delete-my-data
 | Command | What it does |
 | --- | --- |
 | `analyze` | Prepare a preview, ask once, upload, wait, and print the report link and top tasks |
+| `projects` | List the folders with sessions in the window, to pick one for `--project` |
 | `prepare` | Write the redacted preview only; uploads nothing |
 | `upload <preview>` | Upload a prepared preview, then wait for the report |
 | `status <run>` | Show a run's progress; `--wait` follows it to the end |
@@ -116,8 +119,9 @@ revefi-agent-analyzer delete-my-data
 | `delete-my-data` | Delete every run, upload and report made with your account |
 | `login` / `logout` / `whoami` | Sign in (Google or an emailed code), sign out, or show who you're signed in as |
 
-Common options: `--days N` (1 to 7), `--all-projects`, `--exclude-session ID`, `--yes` (don't
-ask), `--json`. Run `revefi-agent-analyzer --help` for all of them.
+Common options: `--days N` (1 to 7), `--all-projects`, `--project DIR` (sessions started in
+`DIR` or below; `projects` lists the folders that have any), `--exclude-session ID`, `--yes`
+(don't ask), `--json`. Run `revefi-agent-analyzer --help` for all of them.
 
 ### Signing in
 

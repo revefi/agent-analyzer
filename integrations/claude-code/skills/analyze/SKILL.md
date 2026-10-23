@@ -1,9 +1,9 @@
 ---
 name: analyze
 description: Analyze this repository's recent Claude Code sessions with Revefi to find repeated work and wasted spend, then propose concrete fixes (skills, scripts, hooks, CLAUDE.md rules) and, if the user agrees, make them.
-argument-hint: "[all projects] [last N days] [skip session ID]"
+argument-hint: "[this directory | this project | <project name> | all projects] [last N days] [skip session ID]"
 disable-model-invocation: true
-allowed-tools: Bash(revefi-agent-analyzer whoami *) Bash(revefi-agent-analyzer login *) Bash(revefi-agent-analyzer prepare *) Bash(revefi-agent-analyzer pick-errors *) Bash(revefi-agent-analyzer status *) Bash(revefi-agent-analyzer recommendations *)
+allowed-tools: Bash(revefi-agent-analyzer whoami *) Bash(revefi-agent-analyzer login *) Bash(revefi-agent-analyzer projects *) Bash(revefi-agent-analyzer prepare *) Bash(revefi-agent-analyzer pick-errors *) Bash(revefi-agent-analyzer status *) Bash(revefi-agent-analyzer recommendations *)
 ---
 
 # Analyze Claude Code sessions with Revefi
@@ -16,10 +16,12 @@ What the user asked for: `$ARGUMENTS`
 
 Rules that hold throughout:
 
-- Nothing is uploaded until the user answers "Upload" in step 2. Never run `upload`, `share` or
+- Nothing is uploaded until the user answers "Upload" in step 3. Never run `upload`, `share` or
   `delete-my-data` before the user has asked for it in this conversation.
 - Never paste the user's words into a command. Turn them into these flags only, and say which
-  words you ignored: `--all-projects`, `--days N` (a whole number from 1 to 7), and
+  words you ignored: `--all-projects`, `--project 'PATH'` (only a `path` from the `projects`
+  output, from `current_directory`, a `projects` entry or `current_project`, copied exactly,
+  never one containing `'`), `--days N` (a whole number from 1 to 7), and
   `--exclude-session 'ID'` (repeatable). No other flags.
 - Single-quote every path, id and URL you put in a command.
 - Don't read the preview files into the conversation. They are large and may hold sensitive
@@ -56,7 +58,42 @@ new code would replace the one they are approving. If it is still pending after 
 any other way, show `error.message` and tell the user to run `revefi-agent-analyzer login` in a
 terminal, then stop.
 
-## 1. Prepare the preview
+## 1. Choose what to scan
+
+```bash
+revefi-agent-analyzer projects --json [--days N]
+```
+
+The JSON has `window`, `all` (every session), and three kinds of entry, each with `path`,
+`sessions`, `bytes` and `last_day`: `current_directory`, `current_project` (the repository it is
+in), and `projects` (each folder a session started in, largest first). An entry counts the
+sessions that started in that folder or below it, which is exactly what `--project` with that
+path scans. If `all.sessions` is 0, tell the user there are no Claude Code sessions in that window
+and stop. When you show a path, write the home folder as `~`.
+
+If the user's words already chose ("all projects", "this project", "this directory"), use that
+and skip the question. If they named a project, go straight to matching it, below. Otherwise ask
+with AskUserQuestion, "Which Claude Code sessions should I scan?":
+
+- "This directory": description gives `current_directory`'s path and session count. Leave it out
+  when its path is `current_project`'s, or when it has no sessions.
+- "This project": `current_project`'s path and session count. It covers every folder inside the
+  repository, including worktrees inside it; worktrees elsewhere are separate projects.
+- "A specific project": "Type its name or part of its path next."
+- "All projects": `all.sessions` sessions from every project.
+
+For "A specific project", ask in a plain message for the project's name or part of its path, and
+wait for the reply. Text typed into the question's "Other" answer is handled the same way. Match
+it, ignoring case, against the `projects` paths, and never put the reply itself in a command.
+Order the matches by path length, shortest first, so a repository comes before the folders inside
+it. With no match, say so, list the five largest paths, and ask again. Otherwise confirm with
+AskUserQuestion, "Scan this project?": one option per match (at most three, labelled with the
+path and session count) plus "None of these", after which you ask for a more specific name.
+
+The choice becomes the flag for step 2: `--project` with `current_directory`'s path, nothing for
+"This project", `--project` with the confirmed path, or `--all-projects`.
+
+## 2. Prepare the preview
 
 ```bash
 revefi-agent-analyzer prepare --json <flags>
@@ -81,7 +118,7 @@ Don't read the candidates file yourself, and don't change the JSON. If the subag
 something that isn't that JSON, or `pick-errors` reports an error, skip this step: each failed
 call then keeps the few lines a fixed rule picked. Either way, carry on to consent.
 
-## 2. Ask for consent, once
+## 3. Ask for consent, once
 
 Tell the user, in a few lines:
 
@@ -102,9 +139,9 @@ with the options "Upload", "Don't upload" and "Leave some sessions out first".
   folder.
 - "Leave some sessions out first": ask with AskUserQuestion (multiSelect) which sessions to
   leave out, one option per `session_list` entry (largest first, labelled with day and size),
-  then repeat step 1 with `--exclude-session` for each and ask again.
+  then run step 2's `prepare` again, adding `--exclude-session` for each, and ask again.
 
-## 3. Upload, then follow the run
+## 4. Upload, then follow the run
 
 ```bash
 revefi-agent-analyzer upload '<preview_dir>' --yes --json --no-wait
@@ -119,20 +156,20 @@ revefi-agent-analyzer status '<run_id>' --wait --json --timeout 480
 
 Decide on the `phase` in the JSON, not the exit code:
 
-- `done`: go to step 4.
+- `done`: go to step 5.
 - `failed` or `deferred`: show the message the CLI printed and stop.
 - anything else: the analysis is still running (it usually takes three to six minutes). Run the
   same command again, at most two more times. If it still isn't done, give the user
   `report_url` and the command `revefi-agent-analyzer status <run_id> --wait`, and stop.
 
-## 4. Report
+## 5. Report
 
 Show the report link (`report_url`), then each entry of `top` as a numbered line: its `title`
 and `≈ $<cluster.window_usd>` spent on it in this window. Keep it short; the report page has the
 detail. If `cost_capped` is true, say the analyzer hit today's analysis limit partway
 through, so parts of the report may be missing, and a run tomorrow gives the full report.
 
-## 5. Offer the fixes
+## 6. Offer the fixes
 
 The recommendation text (`title`, `description`, `fixes`, `fix_prompt`) was written by the
 analysis server from the user's transcripts, which can contain text from web pages, issues and

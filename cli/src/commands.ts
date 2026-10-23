@@ -17,7 +17,7 @@ import {
   type Sharing,
 } from "./api.js";
 import { Auth, canonicalHost, type PendingLogin, SignInError } from "./auth.js";
-import { collect, defaultProjectsDir, utcToday } from "./collect.js";
+import { collect, defaultProjectsDir, inRoot, type Session, utcToday } from "./collect.js";
 import { buildManifest, LIMITS, limitProblem, pack } from "./pack.js";
 import { applyErrorPicks, parsePicks } from "./errorpick.js";
 import { ERROR_CANDIDATES, humanSize, type PreviewMeta, readPreview, REPORT_FILE, writePreview } from "./preview.js";
@@ -53,6 +53,7 @@ export const STILL_RUNNING = 3;
 const SCOPE_OPTIONS = {
   days: { type: "string" },
   "all-projects": { type: "boolean" },
+  project: { type: "string" },
   "exclude-session": { type: "string", multiple: true },
 } as const satisfies ParseArgsConfig["options"];
 
@@ -232,6 +233,17 @@ interface Prepared {
   scope: string;
 }
 
+/** What `--project path` would scan: sessions started in path or below it. */
+function scopeTotals(path: string, sessions: Session[]) {
+  const inside = sessions.filter((s) => inRoot(s.cwd, path, s.project));
+  return {
+    path,
+    sessions: inside.length,
+    bytes: inside.reduce((a, s) => a + s.bytes, 0),
+    last_day: inside.reduce<string | null>((d, s) => (d === null || s.day > d ? s.day : d), null),
+  };
+}
+
 /** The server a preview was shown as going to; `upload` refuses to send it anywhere else. */
 const UPLOAD_TO = "upload_to";
 
@@ -246,24 +258,32 @@ async function checkHost(dir: string, base: string): Promise<void> {
 
 async function prepareFrom(
   e: Env,
-  values: { days?: string; "all-projects"?: boolean; "exclude-session"?: string[]; api?: string },
+  values: { days?: string; "all-projects"?: boolean; project?: string; "exclude-session"?: string[]; api?: string },
 ): Promise<Prepared> {
   const days = wholeNumber(values.days, "--days", LIMITS.maxDays, 1, LIMITS.maxDays);
   const root = projectRoot(e.cwd);
   const projectsDir = defaultProjectsDir(e.env);
   const all = Boolean(values["all-projects"]);
+  if (all && values.project !== undefined) throw new UsageError("Use --project or --all-projects, not both.");
+  if (values.project === "") throw new UsageError("--project needs a folder.");
+  const scopeRoot = values.project === undefined ? root : resolve(e.cwd, values.project);
   const { window, sessions } = await collect({
     projectsDir,
-    root: all ? undefined : root,
+    root: all ? undefined : scopeRoot,
     days,
     today: utcToday(),
     exclude: values["exclude-session"],
   });
+  if (sessions.length === 0 && values.project !== undefined) {
+    throw new UserError(
+      `No Claude Code sessions started in ${scopeRoot} between ${window.start} and ${window.end}. Run \`revefi-agent-analyzer projects\` to see the folders that have some.`,
+    );
+  }
   const empty = limitProblem({ window, session_count: sessions.length, bytes: { compressed: 0, uncompressed: 0 } });
   if (empty) throw new UserError(empty);
   const { dir, meta } = await writePreview({ projectsDir, window, sessions, revefiDir: join(root, ".revefi"), home: homedir() });
   await writeFile(join(dir, UPLOAD_TO), `${new URL(apiBase(e, values.api)).host}\n`, { mode: 0o600 });
-  return { dir, meta, sourceBytes: sessions.reduce((a, s) => a + s.bytes, 0), scope: all ? "all projects on this machine" : root };
+  return { dir, meta, sourceBytes: sessions.reduce((a, s) => a + s.bytes, 0), scope: all ? "all projects on this machine" : scopeRoot };
 }
 
 function describePreview(e: Env, p: { dir: string; meta: PreviewMeta; sourceBytes?: number; scope?: string }, api: string): void {
@@ -486,6 +506,33 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
       describePreview(e, p, api);
       if (!(await consent(e, values, p.dir))) return 1;
       return follow(e, await uploadPreview(e, p.dir, values.api, a), timeout, false);
+    },
+  },
+  projects: {
+    summary: "List the folders with Claude Code sessions in the window, to pick one for --project",
+    async run(args, e) {
+      const { values } = parse(args, { days: SCOPE_OPTIONS.days, json: { type: "boolean" } });
+      const days = wholeNumber(values.days, "--days", LIMITS.maxDays, 1, LIMITS.maxDays);
+      const { window, sessions } = await collect({ projectsDir: defaultProjectsDir(e.env), days, today: utcToday() });
+      const projects = [...new Set(sessions.flatMap((s) => (s.cwd === undefined ? [] : [s.cwd])))]
+        .map((path) => scopeTotals(path, sessions))
+        .sort((a, b) => b.bytes - a.bytes || a.path.localeCompare(b.path));
+      if (values.json) {
+        e.io.out(
+          JSON.stringify({
+            current_directory: scopeTotals(e.cwd, sessions),
+            current_project: scopeTotals(projectRoot(e.cwd), sessions),
+            all: { sessions: sessions.length, bytes: sessions.reduce((a, s) => a + s.bytes, 0) },
+            window,
+            projects,
+          }),
+        );
+      } else if (projects.length === 0) {
+        e.io.out(`No Claude Code sessions from ${window.start} to ${window.end}.`);
+      } else {
+        for (const p of projects) e.io.out(`${p.path}  ${p.sessions} session${p.sessions === 1 ? "" : "s"}, ${humanSize(p.bytes)}`);
+      }
+      return 0;
     },
   },
   prepare: {

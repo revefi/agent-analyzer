@@ -14,6 +14,8 @@ export interface Session {
   project: string;
   id: string;
   day: string;
+  /** Where the session started, as Claude Code recorded it; absent in very old transcripts. */
+  cwd?: string;
   /** Absolute paths: the transcript first, then its subagent transcripts and their metadata. */
   files: string[];
   bytes: number;
@@ -101,7 +103,8 @@ function isVanished(err: unknown): boolean {
   return code === "ENOENT" || code === "EISDIR";
 }
 
-function inRoot(cwd: string | undefined, root: string, project: string): boolean {
+/** Whether a session that started in cwd counts as inside root, as `--project root` scans it. */
+export function inRoot(cwd: string | undefined, root: string, project: string): boolean {
   if (cwd === undefined) return foldCase(project) === foldCase(encodeProjectDir(root));
   const [c, r] = [foldCase(cwd), foldCase(root)];
   return c === r || c.startsWith(r.endsWith(sep) ? r : r + sep);
@@ -118,7 +121,7 @@ async function readSession(
   const info = await stat(transcript);
   // The first record can't be newer than the file's last write.
   if (info.mtime.toISOString().slice(0, 10) < window.start) return undefined;
-  const head = await readHead(transcript, opts.root !== undefined, window);
+  const head = await readHead(transcript, true, window);
   if (!head.day || head.day < window.start || head.day > window.end) return undefined;
   if (opts.root !== undefined && !inRoot(head.cwd, opts.root, project)) return undefined;
   const subs = await subagentFiles(join(projectsDir, project, id));
@@ -127,6 +130,7 @@ async function readSession(
     project,
     id,
     day: head.day,
+    cwd: head.cwd,
     files: [transcript, ...subs],
     bytes: sizes.reduce((a, b) => a + b, info.size),
   };

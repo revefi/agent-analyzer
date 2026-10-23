@@ -639,7 +639,7 @@ async function readSession(projectsDir, project, id, opts, window) {
   const transcript = join3(projectsDir, project, `${id}.jsonl`);
   const info = await stat2(transcript);
   if (info.mtime.toISOString().slice(0, 10) < window.start) return void 0;
-  const head = await readHead(transcript, opts.root !== void 0, window);
+  const head = await readHead(transcript, true, window);
   if (!head.day || head.day < window.start || head.day > window.end) return void 0;
   if (opts.root !== void 0 && !inRoot(head.cwd, opts.root, project)) return void 0;
   const subs = await subagentFiles(join3(projectsDir, project, id));
@@ -648,6 +648,7 @@ async function readSession(projectsDir, project, id, opts, window) {
     project,
     id,
     day: head.day,
+    cwd: head.cwd,
     files: [transcript, ...subs],
     bytes: sizes.reduce((a, b2) => a + b2, info.size)
   };
@@ -4775,6 +4776,7 @@ var STILL_RUNNING = 3;
 var SCOPE_OPTIONS = {
   days: { type: "string" },
   "all-projects": { type: "boolean" },
+  project: { type: "string" },
   "exclude-session": { type: "string", multiple: true }
 };
 var API_OPTION = { api: { type: "string" } };
@@ -4908,6 +4910,15 @@ function redactionLine(meta) {
   if (other) parts.push(`${other} other secret${other === 1 ? "" : "s"} or blobs`);
   return parts.length ? `Removed: ${parts.join(", ")}` : "No known secrets or personal data found.";
 }
+function scopeTotals(path, sessions) {
+  const inside = sessions.filter((s3) => inRoot(s3.cwd, path, s3.project));
+  return {
+    path,
+    sessions: inside.length,
+    bytes: inside.reduce((a, s3) => a + s3.bytes, 0),
+    last_day: inside.reduce((d, s3) => d === null || s3.day > d ? s3.day : d, null)
+  };
+}
 var UPLOAD_TO = "upload_to";
 async function checkHost(dir, base) {
   const file = join7(dir, UPLOAD_TO);
@@ -4922,19 +4933,27 @@ async function prepareFrom(e, values) {
   const root = projectRoot(e.cwd);
   const projectsDir = defaultProjectsDir(e.env);
   const all = Boolean(values["all-projects"]);
+  if (all && values.project !== void 0) throw new UsageError("Use --project or --all-projects, not both.");
+  if (values.project === "") throw new UsageError("--project needs a folder.");
+  const scopeRoot = values.project === void 0 ? root : resolve(e.cwd, values.project);
   const { window, sessions } = await collect({
     projectsDir,
-    root: all ? void 0 : root,
+    root: all ? void 0 : scopeRoot,
     days,
     today: utcToday(),
     exclude: values["exclude-session"]
   });
+  if (sessions.length === 0 && values.project !== void 0) {
+    throw new UserError(
+      `No Claude Code sessions started in ${scopeRoot} between ${window.start} and ${window.end}. Run \`revefi-agent-analyzer projects\` to see the folders that have some.`
+    );
+  }
   const empty = limitProblem({ window, session_count: sessions.length, bytes: { compressed: 0, uncompressed: 0 } });
   if (empty) throw new UserError(empty);
   const { dir, meta } = await writePreview({ projectsDir, window, sessions, revefiDir: join7(root, ".revefi"), home: homedir3() });
   await writeFile4(join7(dir, UPLOAD_TO), `${new URL(apiBase(e, values.api)).host}
 `, { mode: 384 });
-  return { dir, meta, sourceBytes: sessions.reduce((a, s3) => a + s3.bytes, 0), scope: all ? "all projects on this machine" : root };
+  return { dir, meta, sourceBytes: sessions.reduce((a, s3) => a + s3.bytes, 0), scope: all ? "all projects on this machine" : scopeRoot };
 }
 function describePreview(e, p2, api) {
   const { meta } = p2;
@@ -5131,6 +5150,31 @@ var COMMANDS = {
       return follow(e, await uploadPreview(e, p2.dir, values.api, a), timeout, false);
     }
   },
+  projects: {
+    summary: "List the folders with Claude Code sessions in the window, to pick one for --project",
+    async run(args, e) {
+      const { values } = parse(args, { days: SCOPE_OPTIONS.days, json: { type: "boolean" } });
+      const days = wholeNumber(values.days, "--days", LIMITS.maxDays, 1, LIMITS.maxDays);
+      const { window, sessions } = await collect({ projectsDir: defaultProjectsDir(e.env), days, today: utcToday() });
+      const projects = [...new Set(sessions.flatMap((s3) => s3.cwd === void 0 ? [] : [s3.cwd]))].map((path) => scopeTotals(path, sessions)).sort((a, b2) => b2.bytes - a.bytes || a.path.localeCompare(b2.path));
+      if (values.json) {
+        e.io.out(
+          JSON.stringify({
+            current_directory: scopeTotals(e.cwd, sessions),
+            current_project: scopeTotals(projectRoot(e.cwd), sessions),
+            all: { sessions: sessions.length, bytes: sessions.reduce((a, s3) => a + s3.bytes, 0) },
+            window,
+            projects
+          })
+        );
+      } else if (projects.length === 0) {
+        e.io.out(`No Claude Code sessions from ${window.start} to ${window.end}.`);
+      } else {
+        for (const p2 of projects) e.io.out(`${p2.path}  ${p2.sessions} session${p2.sessions === 1 ? "" : "s"}, ${humanSize(p2.bytes)}`);
+      }
+      return 0;
+    }
+  },
   prepare: {
     summary: "Collect and redact sessions into a local preview folder; uploads nothing",
     async run(args, e) {
@@ -5301,7 +5345,7 @@ async function askYesNo(question) {
 }
 
 // cli/src/main.ts
-var VERSION = true ? "0.4.1" : "0.0.0-dev";
+var VERSION = true ? "0.4.2" : "0.0.0-dev";
 var USAGE = `Usage: revefi-agent-analyzer <command> [options]
 
 Find repeated work and wasted spend in your Claude Code sessions.
@@ -5309,9 +5353,10 @@ Find repeated work and wasted spend in your Claude Code sessions.
 Commands:
 ${Object.entries(COMMANDS).map(([name, c]) => `  ${name.padEnd(17)}${c.summary}`).join("\n")}
 
-Options for analyze and prepare:
-  --days N               Days of history to analyze, 1-7 (default 7)
+Options for analyze, prepare and projects:
+  --days N               Days of history to analyze, 1-7 (default 7; projects takes only this)
   --all-projects         Every project on this machine, not just this repository
+  --project DIR          Sessions started in DIR or below it, instead of this repository
   --exclude-session ID   Leave a session out (repeatable; a prefix of the id is enough)
 
 Options for login:
@@ -5321,8 +5366,8 @@ Options for login:
 
 Other options:
   -y, --yes              Don't ask before uploading (analyze, upload) or deleting (delete-my-data)
-  --json                 One JSON object on stdout (login, whoami, prepare, upload, status,
-                         recommendations);
+  --json                 One JSON object on stdout (login, whoami, projects, prepare, upload,
+                         status, recommendations);
                          progress and messages go to stderr; errors print {"error": ...}
   --wait                 status: follow the run until it finishes
   --no-wait              upload: return as soon as the analysis has started
