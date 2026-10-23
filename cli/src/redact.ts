@@ -307,6 +307,52 @@ function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+const INTERRUPT_MARKER = "[Request interrupted";
+
+// Lines that state an error: the analyzer's own error markers plus the exception line a traceback ends on.
+const ERROR_LINE =
+  /^HTTP\/?\s?[45]\d\d|\b[45]\d\d Bad Gateway|^Traceback \(most recent call last\)|^\s*(?:Error|ERROR|FAILED|fatal|error)(?::|\[)|^(?:FAILED|ERROR) |command not found|No such file or directory|^[\w.]*(?:Error|Exception)\b:/;
+// Free-form failure wording, for errors that follow no format (a timeout, a refused connection).
+const ERROR_WORDS =
+  /\b(?:errors?|failed|failure|exception|exceeded|timed? ?out|timeout|cannot|can't|could not|unable to|denied|not found|invalid|unexpected|refused)\b/i;
+const ANSI = /\x1b\[[0-9;]*[A-Za-z]/g;
+const ERROR_MAX_LINES = 6;
+const ERROR_LINE_CHARS = 200;
+const ERROR_CHARS = 500;
+
+/**
+ * The few lines of a failed call's output that state the error: the first line (the analyzer groups
+ * failures by it), lines that look like an error, and the last line, where most tools put the
+ * summary. Everything else in the output is left out.
+ */
+export function errorMessage(output: string): string {
+  const lines = output
+    .replace(ANSI, "")
+    .split("\n")
+    .map((l) => l.trimEnd())
+    .filter((l) => l.trim() !== "");
+  if (!lines.length) return "";
+  const last = lines.length - 1;
+  const formatted = lines.flatMap((l, i) => (i > 0 && i < last && ERROR_LINE.test(l) ? [i] : []));
+  const worded = lines.flatMap((l, i) => (i > 0 && i < last && ERROR_WORDS.test(l) ? [i] : []));
+  const middle = [...new Set([...formatted, ...worded])].slice(0, ERROR_MAX_LINES - 2);
+  const kept = [...new Set([0, ...middle, last])]
+    .sort((a, b) => a - b)
+    .map((i) => lines[i] ?? "")
+    .map((l) => (l.length > ERROR_LINE_CHARS ? `${l.slice(0, ERROR_LINE_CHARS)}…` : l));
+  const message = kept.join("\n");
+  return message.length > ERROR_CHARS ? `${message.slice(0, ERROR_CHARS)}…` : message;
+}
+
+function outputText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((b) => (b && typeof b === "object" && typeof (b as { text?: unknown }).text === "string" ? (b as { text: string }).text : ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
 function isImageBlock(v: Record<string, unknown>): boolean {
   const src = v.source as Record<string, unknown> | undefined;
   return (
@@ -334,6 +380,28 @@ function aboutEnvFile(obj: Record<string, unknown>): boolean {
   );
 }
 
+/**
+ * A tool's output is never sent. A failed call keeps only its error message, redacted; every block
+ * keeps its id and error flag, so the analyzer can pair the call with its result and count
+ * failures, and an interruption keeps its marker.
+ */
+function withoutOutput(
+  block: Record<string, unknown>,
+  counts: Counts,
+  home: string | undefined,
+  envFile: boolean,
+): Record<string, unknown> {
+  const { content, ...rest } = block;
+  const text = outputText(content);
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(rest)) out[k] = redactValue(v, counts, home, envFile);
+  if (text.startsWith(INTERRUPT_MARKER)) out.content = INTERRUPT_MARKER;
+  // Scrubbed whole before lines are picked and cut, so a cut never splits a secret past its pattern.
+  else if (block.is_error === true) out.content = errorMessage(scrubText(text.replace(ANSI, ""), counts, home, envFile));
+  else out.content = "";
+  return out;
+}
+
 export function redactValue(
   value: unknown,
   counts: Counts,
@@ -345,6 +413,7 @@ export function redactValue(
     return value.map((v) => redactValue(v, counts, home, envFile));
   if (typeof value !== "object" || value === null) return value;
   const obj = value as Record<string, unknown>;
+  if (obj.type === "tool_result") return withoutOutput(obj, counts, home, envFile);
   if (isImageBlock(obj)) {
     bump(counts, "image");
     const source = obj.source as Record<string, unknown>;
@@ -353,7 +422,7 @@ export function redactValue(
   const env = envFile || aboutEnvFile(obj);
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(obj)) {
-    // Claude Code's structured duplicate of the tool_result in `message`; the analyzer reads only that one.
+    // Claude Code's structured duplicate of the tool_result in `message`.
     if (k === "toolUseResult") continue;
     const key = scrubText(k, counts, home);
     if (
