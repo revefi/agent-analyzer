@@ -326,22 +326,54 @@ const ERROR_CHARS = 500;
  * summary. Everything else in the output is left out.
  */
 export function errorMessage(output: string): string {
+  const { lines, picked } = errorLines(output);
+  return messageFrom(lines, picked);
+}
+
+/** A failed call's non-empty output lines, and the indexes the fixed rule picks as its error message. */
+export function errorLines(output: string): { lines: string[]; picked: number[] } {
   const lines = output
     .replace(ANSI, "")
     .split("\n")
     .map((l) => l.trimEnd())
     .filter((l) => l.trim() !== "");
-  if (!lines.length) return "";
+  if (!lines.length) return { lines, picked: [] };
   const last = lines.length - 1;
   const formatted = lines.flatMap((l, i) => (i > 0 && i < last && ERROR_LINE.test(l) ? [i] : []));
   const worded = lines.flatMap((l, i) => (i > 0 && i < last && ERROR_WORDS.test(l) ? [i] : []));
   const middle = [...new Set([...formatted, ...worded])].slice(0, ERROR_MAX_LINES - 2);
-  const kept = [...new Set([0, ...middle, last])]
+  return { lines, picked: [...new Set([0, ...middle, last])].sort((a, b) => a - b) };
+}
+
+/** The message sent for the given line indexes: at most 6 lines and 500 characters. */
+export function messageFrom(lines: string[], picked: number[]): string {
+  const kept = [...new Set(picked)]
+    .filter((i) => Number.isInteger(i) && i >= 0 && i < lines.length)
     .sort((a, b) => a - b)
+    .slice(0, ERROR_MAX_LINES)
     .map((i) => lines[i] ?? "")
     .map((l) => (l.length > ERROR_LINE_CHARS ? `${l.slice(0, ERROR_LINE_CHARS)}…` : l));
   const message = kept.join("\n");
   return message.length > ERROR_CHARS ? `${message.slice(0, ERROR_CHARS)}…` : message;
+}
+
+/** A failed call's redacted output, kept only in the local preview so the plugin can pick its error lines. */
+export interface ErrorCandidate {
+  id: string;
+  lines: string[];
+  picked: number[];
+}
+
+// A model reads at most this many lines of one failed output: the head and the tail.
+const CANDIDATE_HEAD = 150;
+const CANDIDATE_TAIL = 100;
+
+function candidateOf(id: string, lines: string[], picked: number[]): ErrorCandidate {
+  if (lines.length <= CANDIDATE_HEAD + CANDIDATE_TAIL) return { id, lines, picked };
+  const tailStart = lines.length - CANDIDATE_TAIL;
+  const kept = [...lines.slice(0, CANDIDATE_HEAD), ...lines.slice(tailStart)];
+  const remap = picked.flatMap((i) => (i < CANDIDATE_HEAD ? [i] : i >= tailStart ? [i - tailStart + CANDIDATE_HEAD] : []));
+  return { id, lines: kept, picked: remap };
 }
 
 function outputText(content: unknown): string {
@@ -390,15 +422,21 @@ function withoutOutput(
   counts: Counts,
   home: string | undefined,
   envFile: boolean,
+  errors?: ErrorCandidate[],
 ): Record<string, unknown> {
   const { content, ...rest } = block;
   const text = outputText(content);
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(rest)) out[k] = redactValue(v, counts, home, envFile);
+  for (const [k, v] of Object.entries(rest)) out[k] = redactValue(v, counts, home, envFile, errors);
   if (text.startsWith(INTERRUPT_MARKER)) out.content = INTERRUPT_MARKER;
-  // Scrubbed whole before lines are picked and cut, so a cut never splits a secret past its pattern.
-  else if (block.is_error === true) out.content = errorMessage(scrubText(text.replace(ANSI, ""), counts, home, envFile));
-  else out.content = "";
+  else if (block.is_error === true) {
+    // Scrubbed whole before lines are picked and cut, so a cut never splits a secret past its pattern.
+    const { lines, picked } = errorLines(scrubText(text.replace(ANSI, ""), counts, home, envFile));
+    out.content = messageFrom(lines, picked);
+    if (errors && typeof block.tool_use_id === "string" && lines.length) {
+      errors.push(candidateOf(block.tool_use_id, lines, picked));
+    }
+  } else out.content = "";
   return out;
 }
 
@@ -407,13 +445,14 @@ export function redactValue(
   counts: Counts,
   home?: string,
   envFile = false,
+  errors?: ErrorCandidate[],
 ): unknown {
   if (typeof value === "string") return scrubText(value, counts, home, envFile);
   if (Array.isArray(value))
-    return value.map((v) => redactValue(v, counts, home, envFile));
+    return value.map((v) => redactValue(v, counts, home, envFile, errors));
   if (typeof value !== "object" || value === null) return value;
   const obj = value as Record<string, unknown>;
-  if (obj.type === "tool_result") return withoutOutput(obj, counts, home, envFile);
+  if (obj.type === "tool_result") return withoutOutput(obj, counts, home, envFile, errors);
   if (isImageBlock(obj)) {
     bump(counts, "image");
     const source = obj.source as Record<string, unknown>;
@@ -433,7 +472,7 @@ export function redactValue(
       bump(counts, "secret-key");
       out[key] = "<REDACTED>";
     } else {
-      out[key] = redactValue(v, counts, home, env);
+      out[key] = redactValue(v, counts, home, env, errors);
     }
   }
   return out;
@@ -447,6 +486,7 @@ export function redactLine(
   line: string,
   counts: Counts,
   home?: string,
+  errors?: ErrorCandidate[],
 ): string | undefined {
   if (!line.trim()) return undefined;
   let parsed: unknown;
@@ -456,7 +496,7 @@ export function redactLine(
     bump(counts, "unparsable-line");
     return undefined;
   }
-  return JSON.stringify(redactValue(parsed, counts, home));
+  return JSON.stringify(redactValue(parsed, counts, home, false, errors));
 }
 
 export function redactJsonl(

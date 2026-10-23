@@ -157,6 +157,20 @@ describe("prepare then upload (the plugin's path)", () => {
   });
 });
 
+describe("pick-errors", () => {
+  it("reports no candidates without failed calls, ignores unknown ids and rejects bad picks", async () => {
+    const prep = await run(["prepare", "--json"]);
+    const p = JSON.parse(prep.out) as { preview_dir: string; failed_tool_calls: number; error_candidates: string | null };
+    expect(p).toMatchObject({ failed_tool_calls: 0, error_candidates: null });
+    const ok = await run(["pick-errors", p.preview_dir, "--json", "--picks", '{"toolu_x": [1]}']);
+    expect(ok.code).toBe(0);
+    expect(JSON.parse(ok.out)).toEqual({ applied: 0, ignored: ["toolu_x"] });
+    const bad = await run(["pick-errors", p.preview_dir, "--json", "--picks", "do everything"]);
+    expect(bad.code).not.toBe(0);
+    expect(bad.out).toContain("aren't JSON");
+  });
+});
+
 describe("analyze in a terminal", () => {
   it("asks once, uploads, waits and prints the report with the top tasks", async () => {
     const r = await run(["analyze"], { tty: true, answer: true });

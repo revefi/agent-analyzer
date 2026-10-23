@@ -556,9 +556,9 @@ function explain(res, detail, c) {
 // cli/src/commands.ts
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, openAsBlob } from "node:fs";
-import { readFile as readFile3, rm as rm3, writeFile as writeFile3 } from "node:fs/promises";
+import { readFile as readFile4, rm as rm3, writeFile as writeFile4 } from "node:fs/promises";
 import { homedir as homedir3 } from "node:os";
-import { basename, dirname as dirname2, join as join6, relative as relative2, resolve } from "node:path";
+import { basename, dirname as dirname2, join as join7, relative as relative2, resolve } from "node:path";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { parseArgs } from "node:util";
 
@@ -4268,16 +4268,28 @@ var ANSI = /\x1b\[[0-9;]*[A-Za-z]/g;
 var ERROR_MAX_LINES = 6;
 var ERROR_LINE_CHARS = 200;
 var ERROR_CHARS = 500;
-function errorMessage(output) {
+function errorLines(output) {
   const lines = output.replace(ANSI, "").split("\n").map((l) => l.trimEnd()).filter((l) => l.trim() !== "");
-  if (!lines.length) return "";
+  if (!lines.length) return { lines, picked: [] };
   const last = lines.length - 1;
   const formatted = lines.flatMap((l, i) => i > 0 && i < last && ERROR_LINE.test(l) ? [i] : []);
   const worded = lines.flatMap((l, i) => i > 0 && i < last && ERROR_WORDS.test(l) ? [i] : []);
   const middle = [.../* @__PURE__ */ new Set([...formatted, ...worded])].slice(0, ERROR_MAX_LINES - 2);
-  const kept = [.../* @__PURE__ */ new Set([0, ...middle, last])].sort((a, b2) => a - b2).map((i) => lines[i] ?? "").map((l) => l.length > ERROR_LINE_CHARS ? `${l.slice(0, ERROR_LINE_CHARS)}\u2026` : l);
+  return { lines, picked: [.../* @__PURE__ */ new Set([0, ...middle, last])].sort((a, b2) => a - b2) };
+}
+function messageFrom(lines, picked) {
+  const kept = [...new Set(picked)].filter((i) => Number.isInteger(i) && i >= 0 && i < lines.length).sort((a, b2) => a - b2).slice(0, ERROR_MAX_LINES).map((i) => lines[i] ?? "").map((l) => l.length > ERROR_LINE_CHARS ? `${l.slice(0, ERROR_LINE_CHARS)}\u2026` : l);
   const message = kept.join("\n");
   return message.length > ERROR_CHARS ? `${message.slice(0, ERROR_CHARS)}\u2026` : message;
+}
+var CANDIDATE_HEAD = 150;
+var CANDIDATE_TAIL = 100;
+function candidateOf(id, lines, picked) {
+  if (lines.length <= CANDIDATE_HEAD + CANDIDATE_TAIL) return { id, lines, picked };
+  const tailStart = lines.length - CANDIDATE_TAIL;
+  const kept = [...lines.slice(0, CANDIDATE_HEAD), ...lines.slice(tailStart)];
+  const remap = picked.flatMap((i) => i < CANDIDATE_HEAD ? [i] : i >= tailStart ? [i - tailStart + CANDIDATE_HEAD] : []);
+  return { id, lines: kept, picked: remap };
 }
 function outputText(content) {
   if (typeof content === "string") return content;
@@ -4298,23 +4310,28 @@ function aboutEnvFile(obj) {
   const result = obj.toolUseResult;
   return namesEnvFile(obj) || namesEnvFile(result) || namesEnvFile(result?.file);
 }
-function withoutOutput(block, counts, home, envFile) {
+function withoutOutput(block, counts, home, envFile, errors) {
   const { content, ...rest } = block;
   const text = outputText(content);
   const out = {};
-  for (const [k2, v2] of Object.entries(rest)) out[k2] = redactValue(v2, counts, home, envFile);
+  for (const [k2, v2] of Object.entries(rest)) out[k2] = redactValue(v2, counts, home, envFile, errors);
   if (text.startsWith(INTERRUPT_MARKER)) out.content = INTERRUPT_MARKER;
-  else if (block.is_error === true) out.content = errorMessage(scrubText(text.replace(ANSI, ""), counts, home, envFile));
-  else out.content = "";
+  else if (block.is_error === true) {
+    const { lines, picked } = errorLines(scrubText(text.replace(ANSI, ""), counts, home, envFile));
+    out.content = messageFrom(lines, picked);
+    if (errors && typeof block.tool_use_id === "string" && lines.length) {
+      errors.push(candidateOf(block.tool_use_id, lines, picked));
+    }
+  } else out.content = "";
   return out;
 }
-function redactValue(value, counts, home, envFile = false) {
+function redactValue(value, counts, home, envFile = false, errors) {
   if (typeof value === "string") return scrubText(value, counts, home, envFile);
   if (Array.isArray(value))
-    return value.map((v2) => redactValue(v2, counts, home, envFile));
+    return value.map((v2) => redactValue(v2, counts, home, envFile, errors));
   if (typeof value !== "object" || value === null) return value;
   const obj = value;
-  if (obj.type === "tool_result") return withoutOutput(obj, counts, home, envFile);
+  if (obj.type === "tool_result") return withoutOutput(obj, counts, home, envFile, errors);
   if (isImageBlock(obj)) {
     bump(counts, "image");
     const source = obj.source;
@@ -4329,12 +4346,12 @@ function redactValue(value, counts, home, envFile = false) {
       bump(counts, "secret-key");
       out[key] = "<REDACTED>";
     } else {
-      out[key] = redactValue(v2, counts, home, env);
+      out[key] = redactValue(v2, counts, home, env, errors);
     }
   }
   return out;
 }
-function redactLine(line, counts, home) {
+function redactLine(line, counts, home, errors) {
   if (!line.trim()) return void 0;
   let parsed;
   try {
@@ -4343,7 +4360,7 @@ function redactLine(line, counts, home) {
     bump(counts, "unparsable-line");
     return void 0;
   }
-  return JSON.stringify(redactValue(parsed, counts, home));
+  return JSON.stringify(redactValue(parsed, counts, home, false, errors));
 }
 function redactJson(text, counts, home) {
   let parsed;
@@ -4359,10 +4376,12 @@ function redactJson(text, counts, home) {
 // cli/src/preview.ts
 var PREVIEW_META = "preview.json";
 var REPORT_FILE = "REDACTION_REPORT.md";
+var ERROR_CANDIDATES = "error-candidates.json";
+var MAX_CANDIDATES = 200;
 var add = (into, from) => {
   for (const [k2, v2] of Object.entries(from)) into[k2] = (into[k2] ?? 0) + v2;
 };
-async function redactJsonlFile(src, dst, counts, home) {
+async function redactJsonlFile(src, dst, counts, home, errors) {
   let bytes = 0;
   await pipeline(
     createReadStream2(src, "utf8"),
@@ -4371,7 +4390,7 @@ async function redactJsonlFile(src, dst, counts, home) {
         input,
         crlfDelay: Infinity
       })) {
-        const redacted = redactLine(line, counts, home);
+        const redacted = redactLine(line, counts, home, errors);
         if (redacted === void 0) continue;
         const chunk = `${redacted}
 `;
@@ -4383,9 +4402,9 @@ async function redactJsonlFile(src, dst, counts, home) {
   );
   return bytes;
 }
-async function redactFile(src, dst, counts, home) {
+async function redactFile(src, dst, counts, home, errors) {
   await mkdir2(dirname(dst), { recursive: true, mode: 448 });
-  if (src.endsWith(".jsonl")) return redactJsonlFile(src, dst, counts, home);
+  if (src.endsWith(".jsonl")) return redactJsonlFile(src, dst, counts, home, errors);
   const body = redactJson(await readFile2(src, "utf8"), counts, home);
   await writeFile2(dst, body, { mode: 384 });
   return Buffer.byteLength(body);
@@ -4402,18 +4421,21 @@ function uploadPath(projectsDir, file, home) {
   const [root, project, ...rest] = archivePath(projectsDir, file).split("/");
   return [root, aliasProjectDir(project ?? "", home), ...rest].join("/");
 }
-async function previewSession(dir, s3, opts) {
+async function previewSession(dir, s3, opts, candidates) {
   const counts = {};
   const paths = [];
   let bytes = 0;
   for (const file of s3.files) {
     const path = uploadPath(opts.projectsDir, file, opts.home);
+    const errors = [];
     bytes += await redactFile(
       file,
       join4(dir, ...path.split("/")),
       counts,
-      opts.home
+      opts.home,
+      errors
     );
+    candidates.push(...errors.map((c) => ({ ...c, file: path })));
     paths.push(path);
   }
   return {
@@ -4438,10 +4460,12 @@ async function writePreview(opts) {
       counts: {},
       bytes: 0
     };
+    const candidates = [];
     for (const s3 of opts.sessions) {
       let ps2;
+      const found = [];
       try {
-        ps2 = await previewSession(dir, s3, opts);
+        ps2 = await previewSession(dir, s3, opts, found);
       } catch (err) {
         if (err.code !== "ENOENT") throw err;
         await rm2(
@@ -4462,6 +4486,16 @@ async function writePreview(opts) {
       meta.sessions.push(ps2);
       add(meta.counts, ps2.counts);
       meta.bytes += ps2.bytes;
+      candidates.push(...found);
+    }
+    if (candidates.length) {
+      meta.error_messages = { failed: candidates.length, picked_by_model: 0 };
+      await writeFile2(
+        join4(dir, ERROR_CANDIDATES),
+        `${JSON.stringify({ candidates: candidates.slice(0, MAX_CANDIDATES) })}
+`,
+        { mode: 384 }
+      );
     }
     await writeFile2(
       join4(dir, PREVIEW_META),
@@ -4538,6 +4572,13 @@ var RULE_LABELS = {
   "unparsable-file": "Unreadable metadata files (emptied)"
 };
 var cell = (s3) => s3.replace(/[|`]/g, (c) => `\\${c}`);
+function errorMessagesLine({ failed, picked_by_model: picked }) {
+  const calls = `${failed} tool call${failed === 1 ? "" : "s"} failed`;
+  const each = `${calls}. Each sends only its error message`;
+  if (!picked) return `${each}: a few lines picked by a fixed rule.`;
+  const haiku = "Claude Haiku in your Claude Code session chose which lines state the error";
+  return picked >= failed ? `${each}; ${haiku}.` : `${each}. For ${picked}, ${haiku}; the rest use a fixed rule.`;
+}
 function renderReport(meta) {
   const rows = Object.entries(meta.counts).sort(([, a], [, b2]) => b2 - a).map(([id, n]) => `| ${RULE_LABELS[id] ?? id} | ${n} |`);
   const sessions = [...meta.sessions].sort((a, b2) => b2.bytes - a.bytes).map(
@@ -4560,6 +4601,7 @@ function renderReport(meta) {
     "",
     "Tool output that Claude Code saves outside the transcripts (`tool-results/`) is never uploaded.",
     "",
+    ...meta.error_messages ? [errorMessagesLine(meta.error_messages), ""] : [],
     "## Sessions, largest first",
     "",
     "| Size | Started | Project | Session | Redactions |",
@@ -4639,6 +4681,86 @@ function limitProblem(m2) {
   return void 0;
 }
 
+// cli/src/errorpick.ts
+import { readFile as readFile3, writeFile as writeFile3 } from "node:fs/promises";
+import { join as join6 } from "node:path";
+function parsePicks(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new PreviewError(`The picks aren't JSON. Expected {"<tool_use_id>": [line numbers]}.`);
+  }
+  const ok = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) && Object.values(parsed).every((v2) => Array.isArray(v2) && v2.every((n) => Number.isInteger(n)));
+  if (!ok) throw new PreviewError('Expected {"<tool_use_id>": [line numbers]}, with whole numbers only.');
+  return parsed;
+}
+async function readCandidates(dir) {
+  let text;
+  try {
+    text = await readFile3(join6(dir, ERROR_CANDIDATES), "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") return [];
+    throw err;
+  }
+  const parsed = JSON.parse(text);
+  return Array.isArray(parsed.candidates) ? parsed.candidates : [];
+}
+function rewrite(text, chosen) {
+  let changed = 0;
+  const lines = text.split("\n").map((line) => {
+    if (!line) return line;
+    const rec = JSON.parse(line);
+    const content = rec.message?.content;
+    if (!Array.isArray(content)) return line;
+    let hit = false;
+    for (const block of content) {
+      const id = block?.tool_use_id;
+      if (block?.type === "tool_result" && block.is_error === true && typeof id === "string" && chosen.has(id)) {
+        block.content = chosen.get(id);
+        hit = true;
+        changed++;
+      }
+    }
+    return hit ? JSON.stringify(rec) : line;
+  });
+  return { text: lines.join("\n"), changed };
+}
+async function applyErrorPicks(dir, picks) {
+  const meta = await readPreview(dir);
+  const candidates = await readCandidates(dir);
+  const byId = new Map(candidates.map((c) => [c.id, c]));
+  const chosen = /* @__PURE__ */ new Map();
+  const ignored = [];
+  for (const [id, numbers] of Object.entries(picks)) {
+    const c = byId.get(id);
+    const indexes = c ? numbers.filter((n) => n >= 1 && n <= c.lines.length).map((n) => n - 1) : [];
+    const message = c && indexes.length ? messageFrom(c.lines, indexes) : "";
+    if (message) chosen.set(id, message);
+    else ignored.push(id);
+  }
+  const files = new Set([...chosen.keys()].map((id) => byId.get(id)?.file ?? ""));
+  let applied = 0;
+  for (const session of meta.sessions) {
+    for (const file of session.paths.filter((p2) => files.has(p2))) {
+      const path = join6(dir, ...file.split("/"));
+      const before = await readFile3(path, "utf8");
+      const { text, changed } = rewrite(before, chosen);
+      if (!changed) continue;
+      await writeFile3(path, text, { mode: 384 });
+      const delta = Buffer.byteLength(text) - Buffer.byteLength(before);
+      session.bytes += delta;
+      meta.bytes += delta;
+      applied += changed;
+    }
+  }
+  meta.error_messages = { failed: meta.error_messages?.failed ?? candidates.length, picked_by_model: applied };
+  await writeFile3(join6(dir, PREVIEW_META), `${JSON.stringify(meta, null, 2)}
+`, { mode: 384 });
+  await writeFile3(join6(dir, REPORT_FILE), renderReport(meta), { mode: 384 });
+  return { applied, ignored };
+}
+
 // cli/src/commands.ts
 var UsageError = class extends Error {
 };
@@ -4689,7 +4811,7 @@ function apiBase(e, api) {
 function serverDir(e, base) {
   const root = e.configDir ?? configDir(e.env);
   const host = new URL(base).host;
-  return host === new URL(DEFAULT_API).host ? root : join6(root, "servers", host.replace(/[^\w.-]/g, "_"));
+  return host === new URL(DEFAULT_API).host ? root : join7(root, "servers", host.replace(/[^\w.-]/g, "_"));
 }
 var loginCommand = (api) => `revefi-agent-analyzer login${api ? ` --api ${quote(api)}` : ""}`;
 function auth(e, api) {
@@ -4783,8 +4905,8 @@ function redactionLine(meta) {
 }
 var UPLOAD_TO = "upload_to";
 async function checkHost(dir, base) {
-  const file = join6(dir, UPLOAD_TO);
-  const recorded = existsSync(file) ? (await readFile3(file, "utf8")).trim() : "";
+  const file = join7(dir, UPLOAD_TO);
+  const recorded = existsSync(file) ? (await readFile4(file, "utf8")).trim() : "";
   const host = new URL(base).host;
   if (recorded && recorded !== host) {
     throw new UserError(`This preview was prepared for ${recorded}, not ${host}. Run \`prepare\` again for ${host}, or pass --api for ${recorded}.`);
@@ -4804,8 +4926,8 @@ async function prepareFrom(e, values) {
   });
   const empty = limitProblem({ window, session_count: sessions.length, bytes: { compressed: 0, uncompressed: 0 } });
   if (empty) throw new UserError(empty);
-  const { dir, meta } = await writePreview({ projectsDir, window, sessions, revefiDir: join6(root, ".revefi"), home: homedir3() });
-  await writeFile3(join6(dir, UPLOAD_TO), `${new URL(apiBase(e, values.api)).host}
+  const { dir, meta } = await writePreview({ projectsDir, window, sessions, revefiDir: join7(root, ".revefi"), home: homedir3() });
+  await writeFile4(join7(dir, UPLOAD_TO), `${new URL(apiBase(e, values.api)).host}
 `, { mode: 384 });
   return { dir, meta, sourceBytes: sessions.reduce((a, s3) => a + s3.bytes, 0), scope: all ? "all projects on this machine" : root };
 }
@@ -4824,7 +4946,7 @@ async function consent(e, values, dir) {
   if (values.yes) return true;
   if (values.json || !e.isTTY) {
     e.io.err(
-      `Nothing was uploaded: there is no terminal here to confirm it. Review ${quote(join6(relative2(e.cwd, dir) || ".", REPORT_FILE))}, then run \`revefi-agent-analyzer upload ${quote(relative2(e.cwd, dir) || ".")}\` in a terminal.`
+      `Nothing was uploaded: there is no terminal here to confirm it. Review ${quote(join7(relative2(e.cwd, dir) || ".", REPORT_FILE))}, then run \`revefi-agent-analyzer upload ${quote(relative2(e.cwd, dir) || ".")}\` in a terminal.`
     );
     return false;
   }
@@ -4842,7 +4964,7 @@ async function uploadPreview(e, dir, api, a = auth(e, api)) {
   const meta = await readPreview(dir);
   await checkHost(dir, apiBase(e, api));
   await ensureSignedIn(e, a);
-  const archive = join6(dir, "upload.tar.gz");
+  const archive = join7(dir, "upload.tar.gz");
   try {
     const packed = await pack(dir, meta, archive);
     const manifest = buildManifest(meta, packed, { name: clientName(e), version: e.version });
@@ -5014,7 +5136,7 @@ var COMMANDS = {
         e.io.out(
           JSON.stringify({
             preview_dir: p2.dir,
-            report: join6(p2.dir, REPORT_FILE),
+            report: join7(p2.dir, REPORT_FILE),
             scope: p2.scope,
             window: p2.meta.window,
             sessions: p2.meta.sessions.length,
@@ -5022,6 +5144,8 @@ var COMMANDS = {
             bytes_before: p2.sourceBytes,
             bytes_after: p2.meta.bytes,
             redactions: p2.meta.counts,
+            failed_tool_calls: p2.meta.error_messages?.failed ?? 0,
+            error_candidates: p2.meta.error_messages ? join7(p2.dir, ERROR_CANDIDATES) : null,
             upload_to: new URL(api).host
           })
         );
@@ -5029,6 +5153,18 @@ var COMMANDS = {
         describePreview(e, p2, api);
         e.io.out(`Upload it with: revefi-agent-analyzer upload ${quote(relative2(e.cwd, p2.dir))}`);
       }
+      return 0;
+    }
+  },
+  "pick-errors": {
+    summary: "Use the chosen lines as failed calls' error messages in a preview (the plugin's Haiku step)",
+    async run(args, e) {
+      const { values, positionals } = parse(args, { picks: { type: "string" }, json: { type: "boolean" } }, 1);
+      if (!values.picks) throw new UsageError("pick-errors needs --picks '<json>'.");
+      const r = await applyErrorPicks(resolve(e.cwd, positionals[0] ?? ""), parsePicks(values.picks));
+      e.io.out(
+        values.json ? JSON.stringify(r) : `Used the chosen lines for ${r.applied} error message${r.applied === 1 ? "" : "s"}${r.ignored.length ? `; ignored ${r.ignored.length}` : ""}.`
+      );
       return 0;
     }
   },
@@ -5160,7 +5296,7 @@ async function askYesNo(question) {
 }
 
 // cli/src/main.ts
-var VERSION = true ? "0.3.0" : "0.0.0-dev";
+var VERSION = true ? "0.4.0" : "0.0.0-dev";
 var USAGE = `Usage: revefi-agent-analyzer <command> [options]
 
 Find repeated work and wasted spend in your Claude Code sessions.

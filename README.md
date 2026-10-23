@@ -65,9 +65,10 @@ folder ignores itself in git.
 (7 days by default), for this repository only unless you pass `--all-projects`. That includes your
 prompts, Claude's replies, the commands and other tools Claude ran, and the code it wrote. The
 output of those tools is not sent. When a tool call failed, only its error message goes: a few
-lines picked from the output (at most 6 lines and 500 characters), redacted like the rest. Subagent
-transcripts of those sessions are included. A small summary goes with them: the dates, the session
-count, the sizes, and the CLI's name and version.
+lines picked from the output (at most 6 lines and 500 characters), redacted like the rest. In
+Claude Code, the plugin asks Claude Haiku, in your own session, which lines state the error;
+elsewhere a fixed rule picks them. Subagent transcripts of those sessions are included. A small
+summary goes with them: the dates, the session count, the sizes, and the CLI's name and version.
 
 **What is removed first:**
 
