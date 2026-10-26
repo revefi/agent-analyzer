@@ -1,0 +1,80 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - name: Committed plugin bundle matches the source
+        run: |
+          git status --porcelain -- integrations/claude-code
+          test -z "$(git status --porcelain -- integrations/claude-code)"
+      - run: integrations/claude-code/bin/revefi-agent-analyzer --version
+      - name: Markdown lint
+        run: pnpm dlx markdownlint-cli2@0.23.3 "**/*.md" "#node_modules"
+
+  plugin-version:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Claude Code updates an installed plugin only when its version changes, so a plugin change
+      # without a bump never reaches existing installs.
+      - name: A plugin change bumps the version
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git diff --quiet "$BASE" HEAD -- integrations/claude-code && exit 0
+          old=$(git show "$BASE:package.json" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')
+          new=$(node -p 'require("./package.json").version')
+          if [ "$old" = "$new" ]; then
+            echo "::error::integrations/claude-code changed but the version is still $new. Bump package.json and plugin.json together."
+            exit 1
+          fi
+
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Dependabot does not track docker run lines; bump the tag and digest together by hand.
+      - name: gitleaks (full history)
+        run: >
+          docker run --rm -v "$PWD:/repo"
+          -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo
+          ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          git /repo --redact --verbose

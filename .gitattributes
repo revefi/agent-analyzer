@@ -1,0 +1,3 @@
+# The plugin's shim must keep LF endings for sh, including on Windows checkouts.
+integrations/claude-code/bin/* text eol=lf
+integrations/claude-code/lib/revefi-agent-analyzer.js -text linguist-generated=true -diff

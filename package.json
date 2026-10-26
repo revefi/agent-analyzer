@@ -1,0 +1,37 @@
+{
+  "name": "revefi-agent-analyzer",
+  "private": true,
+  "version": "0.4.6",
+  "description": "Find repeated work and wasted spend in your Claude Code sessions",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/revefi/agent-analyzer.git"
+  },
+  "type": "module",
+  "bin": {
+    "revefi-agent-analyzer": "dist/revefi-agent-analyzer.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepack": "node scripts/build.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.4",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "esbuild": "0.28.2",
+    "tar": "7.5.22",
+    "typescript": "7.0.2",
+    "vitest": "5.0.2"
+  }
+}

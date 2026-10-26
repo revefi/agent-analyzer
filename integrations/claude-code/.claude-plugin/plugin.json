@@ -1,0 +1,19 @@
+{
+  "name": "revefi",
+  "displayName": "Revefi",
+  "version": "0.4.6",
+  "description": "Find repeated work and wasted spend in your Claude Code sessions, with concrete fixes",
+  "author": {
+    "name": "Revefi",
+    "url": "https://www.revefi.com"
+  },
+  "homepage": "https://github.com/revefi/agent-analyzer",
+  "repository": "https://github.com/revefi/agent-analyzer",
+  "license": "Apache-2.0",
+  "keywords": [
+    "cost",
+    "optimization",
+    "sessions",
+    "analysis"
+  ]
+}
