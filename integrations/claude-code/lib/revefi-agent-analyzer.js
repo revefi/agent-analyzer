@@ -3652,7 +3652,7 @@ var To = (s3) => {
 
 // cli/src/preview.ts
 import { createReadStream as createReadStream2, createWriteStream } from "node:fs";
-import { mkdir as mkdir2, mkdtemp, readFile as readFile2, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
+import { lstat, mkdir as mkdir2, mkdtemp, readFile as readFile2, rename as rename2, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
 import { dirname, join as join4 } from "node:path";
 import { createInterface as createInterface2 } from "node:readline";
 import { pipeline } from "node:stream/promises";
@@ -4415,13 +4415,28 @@ async function redactFile(src, dst, counts, home, errors) {
   await writeFile2(dst, body, { mode: 384 });
   return Buffer.byteLength(body);
 }
+async function mkdirNoSymlink(dir) {
+  await mkdir2(dir, { recursive: true, mode: 448 });
+  if ((await lstat(dir)).isSymbolicLink()) {
+    throw new PreviewError(`${dir} is a symlink. Remove it so the preview stays inside this project.`);
+  }
+}
 async function ensureIgnored(revefiDir) {
-  await mkdir2(revefiDir, { recursive: true, mode: 448 });
-  await writeFile2(join4(revefiDir, ".gitignore"), "*\n", { flag: "wx" }).catch(
-    (err) => {
-      if (err.code !== "EEXIST") throw err;
-    }
-  );
+  await mkdirNoSymlink(revefiDir);
+  const file = join4(revefiDir, ".gitignore");
+  const info = await lstat(file).catch((err) => {
+    if (err.code === "ENOENT") return void 0;
+    throw err;
+  });
+  const existing = info?.isFile() ? await readFile2(file, "utf8") : "";
+  const lines = existing.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  if (info?.isFile() && lines[lines.length - 1] === "*") return;
+  const sep3 = existing && !existing.endsWith("\n") ? "\n" : "";
+  const tmp = `${file}.${process.pid}.tmp`;
+  await writeFile2(tmp, `${existing}${sep3}*
+`, { flag: "wx" });
+  await rename2(tmp, file);
 }
 function uploadPath(projectsDir, file, home) {
   const [root, project, ...rest] = archivePath(projectsDir, file).split("/");
@@ -4456,7 +4471,7 @@ async function previewSession(dir, s3, opts, candidates) {
 async function writePreview(opts) {
   await ensureIgnored(opts.revefiDir);
   const base = join4(opts.revefiDir, "upload-preview");
-  await mkdir2(base, { recursive: true, mode: 448 });
+  await mkdirNoSymlink(base);
   const stamp = (opts.now ?? /* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
   const dir = await mkdtemp(join4(base, `${stamp}-`));
   try {
@@ -5345,7 +5360,7 @@ async function askYesNo(question) {
 }
 
 // cli/src/main.ts
-var VERSION = true ? "0.4.2" : "0.0.0-dev";
+var VERSION = true ? "0.4.3" : "0.0.0-dev";
 var USAGE = `Usage: revefi-agent-analyzer <command> [options]
 
 Find repeated work and wasted spend in your Claude Code sessions.

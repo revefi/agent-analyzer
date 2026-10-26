@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { pipeline } from "node:stream/promises";
@@ -98,14 +98,33 @@ async function redactFile(
   return Buffer.byteLength(body);
 }
 
+/** Creates `dir` and refuses a symlink, which could send redacted transcripts outside the project. */
+async function mkdirNoSymlink(dir: string): Promise<void> {
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  if ((await lstat(dir)).isSymbolicLink()) {
+    throw new PreviewError(`${dir} is a symlink. Remove it so the preview stays inside this project.`);
+  }
+}
+
 /** Keeps redacted transcripts out of the user's git history even if `.revefi/` isn't ignored. */
-async function ensureIgnored(revefiDir: string): Promise<void> {
-  await mkdir(revefiDir, { recursive: true, mode: 0o700 });
-  await writeFile(join(revefiDir, ".gitignore"), "*\n", { flag: "wx" }).catch(
-    (err: NodeJS.ErrnoException) => {
-      if (err.code !== "EEXIST") throw err;
-    },
-  );
+export async function ensureIgnored(revefiDir: string): Promise<void> {
+  await mkdirNoSymlink(revefiDir);
+  const file = join(revefiDir, ".gitignore");
+  const info = await lstat(file).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === "ENOENT") return undefined;
+    throw err;
+  });
+  // A symlink here could point anywhere, so only a regular file is read and kept.
+  const existing = info?.isFile() ? await readFile(file, "utf8") : "";
+  const lines = existing.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  // Exact match only: git keeps leading spaces and CRs, so `  *` or `*\r` is a different rule.
+  if (info?.isFile() && lines[lines.length - 1] === "*") return;
+  // Git applies the last matching rule, so a trailing `*` ignores everything, even after `!` rules.
+  const sep = existing && !existing.endsWith("\n") ? "\n" : "";
+  const tmp = `${file}.${process.pid}.tmp`;
+  await writeFile(tmp, `${existing}${sep}*\n`, { flag: "wx" });
+  await rename(tmp, file);
 }
 
 function uploadPath(projectsDir: string, file: string, home?: string): string {
@@ -150,7 +169,7 @@ export async function writePreview(
 ): Promise<{ dir: string; meta: PreviewMeta }> {
   await ensureIgnored(opts.revefiDir);
   const base = join(opts.revefiDir, "upload-preview");
-  await mkdir(base, { recursive: true, mode: 0o700 });
+  await mkdirNoSymlink(base);
   const stamp = (opts.now ?? new Date()).toISOString().replace(/[:.]/g, "-");
   const dir = await mkdtemp(join(base, `${stamp}-`));
   try {

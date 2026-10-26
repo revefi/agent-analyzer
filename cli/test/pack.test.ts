@@ -1,11 +1,11 @@
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { list } from "tar";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { collect, encodeProjectDir, type Session } from "../src/collect.js";
 import { buildManifest, LIMITS, limitProblem, pack, type Packed } from "../src/pack.js";
-import { PREVIEW_META, PreviewError, type PreviewMeta, readPreview, renderReport, REPORT_FILE, writePreview } from "../src/preview.js";
+import { ensureIgnored, PREVIEW_META, PreviewError, type PreviewMeta, readPreview, renderReport, REPORT_FILE, writePreview } from "../src/preview.js";
 import { validateManifest } from "./contract.js";
 
 const HOME = "/home/dev";
@@ -84,6 +84,46 @@ describe("writePreview", () => {
 
   it("keeps an existing .revefi/.gitignore", () => {
     expect(readFileSync(join(tmp, "repo", ".revefi", ".gitignore"), "utf8")).toBe("# mine\n*\n");
+  });
+
+  it.each([
+    ["no .gitignore", undefined, "*\n"],
+    ["one that would let previews be committed", "!*\n", "!*\n*\n"],
+    ["one without a trailing newline", "keep.txt", "keep.txt\n*\n"],
+    ["one whose last rule only looks like `*`", "  *\n", "  *\n*\n"],
+    ["one with Windows line endings", "*\r\n", "*\r\n*\n"],
+  ])("makes `*` the last .revefi/.gitignore rule when there is %s", async (_case, before, after) => {
+    const dir = mkdtempSync(join(tmp, "ignore-"));
+    if (before !== undefined) writeFileSync(join(dir, ".gitignore"), before);
+    await ensureIgnored(dir);
+    expect(readFileSync(join(dir, ".gitignore"), "utf8")).toBe(after);
+  });
+
+  it.skipIf(!posix)("replaces a symlinked .revefi/.gitignore without writing through it", async () => {
+    const dir = mkdtempSync(join(tmp, "ignore-"));
+    const target = join(tmp, "elsewhere.txt");
+    writeFileSync(target, "untouched\n");
+    symlinkSync(target, join(dir, ".gitignore"));
+    await ensureIgnored(dir);
+    expect(readFileSync(target, "utf8")).toBe("untouched\n");
+    expect(lstatSync(join(dir, ".gitignore")).isFile()).toBe(true);
+    expect(readFileSync(join(dir, ".gitignore"), "utf8")).toBe("*\n");
+  });
+
+  it.skipIf(!posix)("refuses a .revefi that is a symlink", async () => {
+    const real = mkdtempSync(join(tmp, "real-"));
+    const link = join(tmp, "linked-revefi");
+    symlinkSync(real, link);
+    await expect(ensureIgnored(link)).rejects.toThrow(PreviewError);
+  });
+
+  it.skipIf(!posix)("refuses an upload-preview folder that is a symlink", async () => {
+    const revefiDir = mkdtempSync(join(tmp, "revefi-"));
+    const outside = mkdtempSync(join(tmp, "outside-"));
+    symlinkSync(outside, join(revefiDir, "upload-preview"));
+    const window = { days: 7, start: "2026-09-25", end: "2026-10-01" };
+    await expect(writePreview({ projectsDir, window, sessions, revefiDir, home: HOME })).rejects.toThrow(PreviewError);
+    expect(readdirSync(outside)).toEqual([]);
   });
 
   it("leaves out a session that vanished, and records exactly what will be sent", async () => {
