@@ -22,17 +22,17 @@ main() {
   case "$(uname -s)" in
     Darwin) os=darwin ;;
     Linux) os=linux ;;
-    *) fail "this installer supports macOS and Linux. On Windows, download revefi-agent-analyzer-windows-x64.exe from https://github.com/$repo/releases, or run: npm install -g revefi-agent-analyzer" ;;
+    *) fail "this installer supports macOS and Linux. On Windows, download revefi-agent-analyzer-windows-x64.exe from https://github.com/$repo/releases, or download revefi-agent-analyzer.js from https://github.com/$repo/releases and run it with Node.js 22.12 or newer" ;;
   esac
   case "$(uname -m)" in
     x86_64 | amd64) arch=x64 ;;
     arm64 | aarch64) arch=arm64 ;;
-    *) fail "no binary for $(uname -m). Install with npm instead: npm install -g revefi-agent-analyzer" ;;
+    *) fail "no binary for $(uname -m). Instead, download revefi-agent-analyzer.js from https://github.com/$repo/releases and run it with Node.js 22.12 or newer." ;;
   esac
   # A shell running under Rosetta reports x86_64 on Apple silicon.
   if [ "$os" = darwin ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 1 ]; then arch=arm64; fi
   if [ "$os" = linux ] && { [ -e "/lib/ld-musl-$(uname -m).so.1" ] || ldd --version 2>&1 | grep -qi musl; }; then
-    fail "musl-based Linux (such as Alpine) isn't supported by the binary. Install with npm instead: npm install -g revefi-agent-analyzer"
+    fail "musl-based Linux (such as Alpine) isn't supported by the binary. Instead, download revefi-agent-analyzer.js from https://github.com/$repo/releases and run it with Node.js 22.12 or newer."
   fi
 
   version="${REVEFI_VERSION:-latest}"

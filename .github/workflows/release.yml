@@ -45,7 +45,7 @@ jobs:
           git status --porcelain -- integrations/claude-code
           test -z "$(git status --porcelain -- integrations/claude-code)"
 
-      - name: Compile standalone binaries and pack the npm tarball
+      - name: Compile standalone binaries
         run: |
           version=$(node -p 'require("./package.json").version')
           mkdir -p release
@@ -56,7 +56,6 @@ jobs:
               --define "__VERSION__=\"$version\"" --outfile "$out"
           done
           cp dist/revefi-agent-analyzer.js install.sh release/
-          npm pack --ignore-scripts --pack-destination release
           (cd release && sha256sum -- * > SHA256SUMS)
           cat release/SHA256SUMS
 
@@ -139,7 +138,7 @@ jobs:
         run: |
           visibility=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)
           if [ "$visibility" != public ]; then
-            echo "::error::Releases need a public repository (this one is $visibility): npm provenance and the installer both depend on it."
+            echo "::error::Releases need a public repository (this one is $visibility): the installer verifies attestations from it."
             exit 1
           fi
           main=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
@@ -159,33 +158,11 @@ jobs:
         with:
           subject-checksums: release/SHA256SUMS
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
-
-      # Draft first, so a failed npm publish never leaves a half-published release behind.
-      - name: Draft the GitHub release
+      - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
           flags=""
           case "$TAG" in *-*) flags="--prerelease" ;; esac
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --generate-notes $flags release/*
-
-      # npm trusted publishing (OIDC): no token is stored; provenance is attached automatically.
-      - name: Publish to npm
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          npm install -g npm@11.6.2
-          dist_tag=latest
-          case "$TAG" in *-*) dist_tag=next ;; esac
-          npm publish release/revefi-agent-analyzer-*.tgz --access public --tag "$dist_tag" --ignore-scripts
-
-      - name: Publish the GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --generate-notes $flags release/*

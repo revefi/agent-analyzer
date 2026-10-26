@@ -27,13 +27,7 @@ executables are not installed by claude.ai or Cowork; use Claude Code in a termi
 
 ### Command line
 
-With Node.js 22.12 or newer:
-
-```bash
-npm install -g revefi-agent-analyzer
-```
-
-Or a standalone binary for macOS or Linux, with no Node needed:
+A standalone binary for macOS or Linux, with no Node needed:
 
 ```bash
 curl -fsSL https://github.com/revefi/agent-analyzer/releases/latest/download/install.sh | sh
@@ -41,7 +35,8 @@ curl -fsSL https://github.com/revefi/agent-analyzer/releases/latest/download/ins
 
 The installer checks the binary against the release's `SHA256SUMS`, verifies its GitHub build
 attestation when the `gh` CLI is installed (set `REVEFI_VERIFY=1` to require that), and installs
-it to `~/.local/bin`. Windows binaries are on the
+it to `~/.local/bin`. Windows binaries, and `revefi-agent-analyzer.js` for any system with
+Node.js 22.12 or newer (`node revefi-agent-analyzer.js`), are on the
 [releases page](https://github.com/revefi/agent-analyzer/releases).
 
 The binaries are not yet signed by Revefi. Installed with the command above they run normally;
@@ -162,7 +157,7 @@ The plugin is installed straight from this repository, so its bundle is committe
 it differs from a fresh build. To release, bump `version` in both `package.json` and
 `integrations/claude-code/.claude-plugin/plugin.json`, merge, and push a `vX.Y.Z` tag on `main`.
 The release workflow tests every binary on its own platform, attests the build, and publishes
-to npm through trusted publishing; the `release` environment must approve it. Claude Code
+the GitHub release; the `release` environment must approve it. Claude Code
 updates installed plugins when that version changes.
 
 ## Security and license
