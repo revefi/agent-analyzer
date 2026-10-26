@@ -21,7 +21,7 @@ Rules that hold throughout:
 - Never paste the user's words into a command. Turn them into these flags only, and say which
   words you ignored: `--all-projects`, `--project 'PATH'` (only a `path` from the `projects`
   output, from `current_directory`, a `projects` entry or `current_project`, copied exactly,
-  never one containing `'`), `--days N` (a whole number from 1 to 7), and
+  never one containing `'`), `--days N` (a whole number from 1 to 15), and
   `--exclude-session 'ID'` (repeatable). No other flags.
 - Single-quote every path, id and URL you put in a command.
 - Don't read the preview files into the conversation. They are large and may hold sensitive

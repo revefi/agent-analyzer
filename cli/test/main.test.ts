@@ -38,8 +38,8 @@ describe("main", () => {
   });
 
   it("rejects a bad flag value for a command with exit code 2", async () => {
-    const r = await run(["prepare", "--days", "30"]);
+    const r = await run(["prepare", "--days", "16"]);
     expect(r.code).toBe(2);
-    expect(r.err).toContain("--days must be a whole number from 1 to 7.");
+    expect(r.err).toContain("--days must be a whole number from 1 to 15.");
   });
 });
