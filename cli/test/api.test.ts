@@ -204,6 +204,13 @@ describe("upload", () => {
   });
   const blob = new Blob([new Uint8Array([1, 2, 3])]);
 
+  it("uploads an archive whose slow-connection timeout isn't a whole number of milliseconds", async () => {
+    const big = new Blob([new Uint8Array(19_541_238)]);
+    const { client, seen } = fakeServer({ "PUT /u": () => new Response(null, { status: 200 }) });
+    await client.upload(target("2999-01-01T00:00:00Z", String(big.size)), big);
+    expect(seen.filter((r) => r.method === "PUT")).toHaveLength(1);
+  });
+
   it("refuses to send an archive whose size no longer matches what was signed", async () => {
     const { client, seen } = fakeServer({});
     await expect(client.upload(target("2999-01-01T00:00:00Z", "4"), blob)).rejects.toThrow("The archive changed after it was packed.");

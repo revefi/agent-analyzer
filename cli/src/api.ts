@@ -181,8 +181,9 @@ export class Client {
     if (declared !== undefined && Number(declared) !== body.size) {
       throw new ApiError("The archive changed after it was packed. Run the command again.");
     }
-    // At least two minutes, plus time for a slow (50 KB/s) connection.
-    const timeout = Math.max(120_000, (body.size / 50_000) * 1000);
+    // At least two minutes, plus time for a slow (50 KB/s) connection. AbortSignal.timeout
+    // rejects a fractional delay, so round up to whole milliseconds.
+    const timeout = Math.max(120_000, Math.ceil((body.size / 50_000) * 1000));
     const res = await this.send(
       target.url,
       { method: target.method ?? "PUT", headers: target.headers, body, signal: AbortSignal.timeout(timeout) },
