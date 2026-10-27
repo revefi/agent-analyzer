@@ -447,7 +447,7 @@ var Client = class {
     if (declared !== void 0 && Number(declared) !== body.size) {
       throw new ApiError("The archive changed after it was packed. Run the command again.");
     }
-    const timeout = Math.max(12e4, body.size / 5e4 * 1e3);
+    const timeout = Math.max(12e4, Math.ceil(body.size / 5e4 * 1e3));
     const res = await this.send(
       target.url,
       { method: target.method ?? "PUT", headers: target.headers, body, signal: AbortSignal.timeout(timeout) },
@@ -5371,7 +5371,7 @@ async function askYesNo(question) {
 }
 
 // cli/src/main.ts
-var VERSION = true ? "0.4.6" : "0.0.0-dev";
+var VERSION = true ? "0.4.7" : "0.0.0-dev";
 var USAGE = `Usage: revefi-agent-analyzer <command> [options]
 
 Find repeated work and wasted spend in your Claude Code sessions.

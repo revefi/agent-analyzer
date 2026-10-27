@@ -1,7 +1,7 @@
 {
   "name": "revefi-agent-analyzer",
   "private": true,
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "Find repeated work and wasted spend in your Claude Code sessions",
   "license": "Apache-2.0",
   "repository": {
