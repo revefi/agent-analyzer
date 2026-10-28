@@ -5324,7 +5324,7 @@ var COMMANDS = {
     }
   },
   share: {
-    summary: "Show or change who can open a run's report: share <run> [--add EMAIL] [--remove EMAIL] [--link on|off]",
+    summary: "Show or change who can open a run's report: share <run> [--add EMAIL] [--remove EMAIL] [--link on|off] (on: anyone with the link)",
     async run(args, e) {
       const { values, positionals } = parse(
         args,
@@ -5333,7 +5333,7 @@ var COMMANDS = {
       );
       const runId = positionals[0] ?? "";
       if (values.link !== void 0 && values.link !== "on" && values.link !== "off") {
-        throw new UsageError("--link must be on (anyone signed in with the link) or off.");
+        throw new UsageError("--link must be on (anyone with the link) or off.");
       }
       const add2 = (values.add ?? []).map((email) => email.trim().toLowerCase());
       const bad = add2.find((email) => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email));
@@ -5352,7 +5352,7 @@ var COMMANDS = {
         return 0;
       }
       e.io.out(sharing.emails.length ? `Shared with: ${sharing.emails.join(", ")}` : "Not shared with anyone by email.");
-      e.io.out(sharing.link ? "Anyone signed in who has the link can open it." : "The link alone doesn't give access.");
+      e.io.out(sharing.link ? "Anyone with the link can open it." : "The link alone doesn't give access.");
       e.io.out(`Report: ${c.link(report_url)}`);
       return 0;
     }
@@ -5392,7 +5392,7 @@ async function askYesNo(question) {
 }
 
 // cli/src/main.ts
-var VERSION = true ? "0.5.0" : "0.0.0-dev";
+var VERSION = true ? "0.5.1" : "0.0.0-dev";
 var USAGE = `Usage: revefi-agent-analyzer <command> [options]
 
 Find repeated work and wasted spend in your Claude Code sessions.

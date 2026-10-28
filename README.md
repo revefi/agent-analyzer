@@ -43,8 +43,8 @@ would be sent, in `.revefi/upload-preview/`, with a report of everything removed
 Redaction matches known formats, so it can't catch everything. People's names and addresses
 aren't detected. Read the preview, and ask Claude to leave out any session you'd rather not share.
 
-Reports are private until you share them. Ask Claude to share one, or to delete everything you've
-uploaded.
+Reports are private until you share them. Ask Claude to share one with specific people or with
+anyone with the link, or to delete everything you've uploaded.
 
 ## Development
 

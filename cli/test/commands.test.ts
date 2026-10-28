@@ -224,7 +224,7 @@ describe("feedback, share and delete", () => {
     const put = r.seen.find((s) => s.method === "PUT");
     expect(JSON.parse(String(put?.body))).toEqual({ link: true, emails: ["ada@example.com", "grace@example.com"] });
     expect(r.out).toBe(
-      "Shared with: ada@example.com, grace@example.com\nAnyone signed in who has the link can open it.\nReport: https://api.test/r/slug",
+      "Shared with: ada@example.com, grace@example.com\nAnyone with the link can open it.\nReport: https://api.test/r/slug",
     );
   });
 
@@ -237,7 +237,9 @@ describe("feedback, share and delete", () => {
 
   it("rejects a malformed email or link setting before calling the server", async () => {
     expect((await run(["share", "r1", "--add", "grace"])).code).toBe(2);
-    expect((await run(["share", "r1", "--link", "yes"])).code).toBe(2);
+    const badLink = await run(["share", "r1", "--link", "yes"]);
+    expect(badLink.code).toBe(2);
+    expect(badLink.err).toContain("--link must be on (anyone with the link) or off.");
   });
 
   it("asks to sign in before deleting", async () => {
