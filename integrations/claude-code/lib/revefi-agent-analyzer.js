@@ -4645,7 +4645,7 @@ function renderReport(meta) {
 
 // cli/src/pack.ts
 var LIMITS = {
-  maxDays: 7,
+  maxDays: 15,
   maxCompressedBytes: 200 * 1024 * 1024,
   maxUncompressedBytes: 2 * 1024 * 1024 * 1024
 };
@@ -4898,6 +4898,7 @@ function wholeNumber(raw, flag, fallback, min, max = Number.MAX_SAFE_INTEGER) {
   }
   return n;
 }
+var DEFAULT_DAYS = 7;
 var quote = (p2) => /^[\w./~-]+$/.test(p2) ? p2 : `"${p2.replace(/(["\\$`])/g, "\\$1")}"`;
 var COUNT_LABELS = {
   "private-key": ["private key", "private keys"],
@@ -4955,7 +4956,7 @@ async function checkHost(dir, base) {
   }
 }
 async function prepareFrom(e, values) {
-  const days = wholeNumber(values.days, "--days", LIMITS.maxDays, 1, LIMITS.maxDays);
+  const days = wholeNumber(values.days, "--days", DEFAULT_DAYS, 1, LIMITS.maxDays);
   const root = projectRoot(e.cwd);
   const projectsDir = defaultProjectsDir(e.env);
   const all = Boolean(values["all-projects"]);
@@ -5180,7 +5181,7 @@ var COMMANDS = {
     summary: "List the folders with Claude Code sessions in the window, to pick one for --project",
     async run(args, e) {
       const { values } = parse(args, { days: SCOPE_OPTIONS.days, json: { type: "boolean" } });
-      const days = wholeNumber(values.days, "--days", LIMITS.maxDays, 1, LIMITS.maxDays);
+      const days = wholeNumber(values.days, "--days", DEFAULT_DAYS, 1, LIMITS.maxDays);
       const { window, sessions } = await collect({ projectsDir: defaultProjectsDir(e.env), days, today: utcToday() });
       const projects = [...new Set(sessions.flatMap((s3) => s3.cwd === void 0 ? [] : [s3.cwd]))].map((path) => scopeTotals(path, sessions)).sort((a, b2) => b2.bytes - a.bytes || a.path.localeCompare(b2.path));
       if (values.json) {
@@ -5380,7 +5381,7 @@ Commands:
 ${Object.entries(COMMANDS).map(([name, c]) => `  ${name.padEnd(17)}${c.summary}`).join("\n")}
 
 Options for analyze, prepare and projects:
-  --days N               Days of history to analyze, 1-7 (default 7; projects takes only this)
+  --days N               Days of history to analyze, 1-15 (default 7; projects takes only this)
   --all-projects         Every project on this machine, not just this repository
   --project DIR          Sessions started in DIR or below it, instead of this repository
   --exclude-session ID   Leave a session out (repeatable; a prefix of the id is enough)

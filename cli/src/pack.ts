@@ -4,7 +4,7 @@ import { create } from "tar";
 import { humanSize, PreviewError, type PreviewMeta } from "./preview.js";
 
 export const LIMITS = {
-  maxDays: 7,
+  maxDays: 15,
   maxCompressedBytes: 200 * 1024 * 1024,
   maxUncompressedBytes: 2 * 1024 * 1024 * 1024,
 };

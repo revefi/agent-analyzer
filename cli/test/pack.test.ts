@@ -206,13 +206,13 @@ describe("limitProblem", () => {
   });
 
   it("checks the window before emptiness, and only suggests a longer window when allowed", () => {
-    expect(limitProblem({ ...ok, session_count: 0, window: { ...ok.window, days: 30 } })).toMatch(/--days 7 or fewer/);
+    expect(limitProblem({ ...ok, session_count: 0, window: { ...ok.window, days: 30 } })).toMatch(/--days 15 or fewer/);
     expect(limitProblem({ ...ok, session_count: 0 })).toBe(
-      "No Claude Code sessions started between 2026-09-25 and 2026-10-01 here. Try --all-projects.",
+      "No Claude Code sessions started between 2026-09-25 and 2026-10-01 here. Try --all-projects or --days 15.",
     );
-    expect(limitProblem({ ...ok, session_count: 0, window: { days: 3, start: "2026-09-29", end: "2026-10-01" } })).toMatch(
-      /--all-projects or --days 7\.$/,
-    );
+    expect(
+      limitProblem({ ...ok, session_count: 0, window: { days: 15, start: "2026-09-17", end: "2026-10-01" } }),
+    ).toMatch(/Try --all-projects\.$/);
   });
 
   it("names the limit that was exceeded and how to get under it", () => {

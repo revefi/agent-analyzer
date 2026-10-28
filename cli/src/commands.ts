@@ -183,6 +183,9 @@ function wholeNumber(raw: string | undefined, flag: string, fallback: number, mi
   return n;
 }
 
+/** A week by default; up to `LIMITS.maxDays` when asked for. */
+export const DEFAULT_DAYS = 7;
+
 const quote = (p: string) => (/^[\w./~-]+$/.test(p) ? p : `"${p.replace(/(["\\$`])/g, "\\$1")}"`);
 
 const COUNT_LABELS: Record<string, [string, string]> = {
@@ -260,7 +263,7 @@ async function prepareFrom(
   e: Env,
   values: { days?: string; "all-projects"?: boolean; project?: string; "exclude-session"?: string[]; api?: string },
 ): Promise<Prepared> {
-  const days = wholeNumber(values.days, "--days", LIMITS.maxDays, 1, LIMITS.maxDays);
+  const days = wholeNumber(values.days, "--days", DEFAULT_DAYS, 1, LIMITS.maxDays);
   const root = projectRoot(e.cwd);
   const projectsDir = defaultProjectsDir(e.env);
   const all = Boolean(values["all-projects"]);
@@ -512,7 +515,7 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
     summary: "List the folders with Claude Code sessions in the window, to pick one for --project",
     async run(args, e) {
       const { values } = parse(args, { days: SCOPE_OPTIONS.days, json: { type: "boolean" } });
-      const days = wholeNumber(values.days, "--days", LIMITS.maxDays, 1, LIMITS.maxDays);
+      const days = wholeNumber(values.days, "--days", DEFAULT_DAYS, 1, LIMITS.maxDays);
       const { window, sessions } = await collect({ projectsDir: defaultProjectsDir(e.env), days, today: utcToday() });
       const projects = [...new Set(sessions.flatMap((s) => (s.cwd === undefined ? [] : [s.cwd])))]
         .map((path) => scopeTotals(path, sessions))
