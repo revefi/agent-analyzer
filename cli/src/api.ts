@@ -53,7 +53,7 @@ export interface Recommendations {
 
 /** Who besides the owner can open a report. */
 export interface Sharing {
-  /** Anyone signed in who has the link. */
+  /** Anyone with the link. */
   link: boolean;
   emails: string[];
 }

@@ -195,9 +195,10 @@ here?", one option per entry, by title. For each one the user picks, in turn:
 
 - The user rates a recommendation: `revefi-agent-analyzer feedback '<run_id>' '<id>' up` (or
   `down`).
-- The user wants to share the report. Reports are private until shared, and only signed-in
-  people can open a shared one. Ask whom with: specific people, by the email they sign in
-  with, or anyone signed in who has the link. Then run
+- The user wants to share the report. Reports are private until shared. Ask whom with:
+  specific people, by the email they sign in with, or anyone with the link. Before turning the
+  link on, tell the user that anyone with the link can open the report, including anyone it is
+  forwarded to, and offer specific people instead. Then run
   `revefi-agent-analyzer share '<run_id>' --add '<email>'` (repeat `--add` per person), or
   `share '<run_id>' --link on`. `--remove '<email>'` and `--link off` take access away, and
   `share '<run_id>' --json` shows who has it now. Show the user the result and the report link.
