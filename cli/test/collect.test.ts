@@ -7,6 +7,8 @@ import {
   collect,
   defaultProjectsDir,
   encodeProjectDir,
+  pick,
+  type Session,
   utcToday,
   windowEndingOn,
 } from "../src/collect.js";
@@ -99,6 +101,17 @@ describe("collect", () => {
     expect(readdirSync("/dev/fd").length - before).toBeLessThan(10);
   });
 
+  it("reaches back for the most recent sessions when the window has too few", async () => {
+    const opts = { ...base(), root: ROOT, exclude: ["s-skip"] };
+    const nine = await collect({ ...opts, minSessions: 9 });
+    expect(nine.window).toEqual({ days: 8, start: "2026-09-24", end: "2026-10-01" });
+    expect(ids(nine)).toContain("s-crosses");
+    expect(ids(nine)).not.toContain("s-old");
+    const ten = await collect({ ...opts, minSessions: 10 });
+    expect(ten.window).toEqual({ days: 31, start: "2026-09-01", end: "2026-10-01" });
+    expect(ten.sessions).toHaveLength(10);
+  });
+
   it("uploads only the subagent folder, transcript first, never tool-results", async () => {
     const r = await collect({ ...base(), root: ROOT });
     const s = r.sessions.find((x) => x.id === "s-in");
@@ -108,6 +121,28 @@ describe("collect", () => {
       "projects/-work-app/s-in/subagents/agent-a1.meta.json",
     ]);
     expect(s?.bytes).toBeGreaterThan(0);
+  });
+});
+
+describe("pick", () => {
+  const s = (id: string, day: string): Session => ({ project: "p", id, day, files: [], bytes: 1 });
+  const all = [s("a", "2026-10-01"), s("b", "2026-09-20"), s("c", "2026-09-20"), s("d", "2026-08-01")];
+  const ids = (r: ReturnType<typeof pick>) => r.sessions.map((x) => x.id);
+
+  it("keeps the window when it already holds the floor", () => {
+    expect(pick(all, "2026-10-01", 7, 1)).toEqual({ window: windowEndingOn("2026-10-01", 7), sessions: [all[0]] });
+  });
+
+  it("takes the newest sessions past the window, widening it to their span, in their original order", () => {
+    const r = pick(all, "2026-10-01", 7, 2);
+    expect(ids(r)).toEqual(["a", "b"]);
+    expect(r.window).toEqual({ days: 12, start: "2026-09-20", end: "2026-10-01" });
+    expect(ids(pick(all, "2026-10-01", 7, 10))).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("keeps the window when there is nothing older to add", () => {
+    expect(pick(all.slice(0, 1), "2026-10-01", 15, 15).window.days).toBe(15);
+    expect(pick([], "2026-10-01", 15, 15)).toEqual({ window: windowEndingOn("2026-10-01", 15), sessions: [] });
   });
 });
 

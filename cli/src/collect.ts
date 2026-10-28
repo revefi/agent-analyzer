@@ -28,7 +28,12 @@ export interface CollectOptions {
   days: number;
   today: string;
   exclude?: string[];
+  /** Reach back past `days` for this many of the most recent sessions; see `pick`. */
+  minSessions?: number;
 }
+
+/** How far back `minSessions` reaches: the most days an upload manifest may span. */
+export const MAX_LOOKBACK_DAYS = 90;
 
 export function defaultProjectsDir(env: NodeJS.ProcessEnv = process.env): string {
   return join(env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "projects");
@@ -137,7 +142,8 @@ async function readSession(
 }
 
 export async function collect(opts: CollectOptions): Promise<{ window: Window; sessions: Session[] }> {
-  const window = windowEndingOn(opts.today, opts.days);
+  const floor = opts.minSessions ?? 0;
+  const window = windowEndingOn(opts.today, floor > 0 ? MAX_LOOKBACK_DAYS : opts.days);
   const exclude = (opts.exclude ?? []).filter((x) => x.length > 0);
   // Long folder names may be truncated by Claude Code; the recorded cwd stays authoritative.
   const prefix = opts.root === undefined ? "" : foldCase(encodeProjectDir(opts.root).slice(0, 200));
@@ -164,7 +170,24 @@ export async function collect(opts: CollectOptions): Promise<{ window: Window; s
       }
     }
   }
-  return { window, sessions };
+  return pick(sessions, opts.today, opts.days, floor);
+}
+
+const byNewest = (a: Session, b: Session) => (a.day === b.day ? (a.id < b.id ? -1 : 1) : a.day > b.day ? -1 : 1);
+
+/**
+ * The sessions of the last `days` days or, when those are fewer than `floor`, the `floor` most
+ * recent ones, with the window widened to their real span so the server analyzes all of them.
+ */
+export function pick(sessions: Session[], today: string, days: number, floor: number): { window: Window; sessions: Session[] } {
+  const window = windowEndingOn(today, days);
+  const recent = sessions.filter((s) => s.day >= window.start && s.day <= today);
+  const latest = recent.length >= floor ? [] : sessions.filter((s) => s.day <= today).sort(byNewest).slice(0, floor);
+  const oldest = latest.at(-1)?.day;
+  if (oldest === undefined || oldest >= window.start) return { window, sessions: recent };
+  const keep = new Set(latest);
+  const span = Math.round((Date.parse(today) - Date.parse(oldest)) / 86_400_000) + 1;
+  return { window: windowEndingOn(today, span), sessions: sessions.filter((s) => keep.has(s)) };
 }
 
 /** Path inside the upload archive: `projects/<project>/...`, always with forward slashes. */

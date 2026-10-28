@@ -484,11 +484,11 @@ describe("choosing what to scan", () => {
       projects: Totals[];
     };
 
-  it("scans a week by default and up to 15 days when asked", async () => {
+  it("scans 15 days by default, or as many as asked", async () => {
     const days = async (...args: string[]) =>
       (JSON.parse((await run(["projects", "--json", ...args], { cwd: repo })).out) as { window: { days: number } }).window.days;
-    expect(await days()).toBe(7);
-    expect(await days("--days", "15")).toBe(15);
+    expect(await days()).toBe(15);
+    expect(await days("--days", "3")).toBe(3);
   });
 
   it("counts each folder the way --project scans it: the folder and everything below it", async () => {
