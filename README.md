@@ -26,9 +26,6 @@ Then run `/revefi:analyze` in any repository. It asks which sessions to scan (th
 this project, one you name, or all) and has you sign in with Google or an emailed code the first
 time. Needs Node.js 22.12 or newer, and Claude Code in a terminal or an IDE.
 
-To get new versions automatically, open `/plugin`, go to **Marketplaces**, select `revefi` and
-choose **Enable auto-update**.
-
 ## Redaction
 
 Nothing leaves your machine until you approve. First you get a preview of the exact files that
@@ -53,10 +50,6 @@ uploaded.
 ```bash
 pnpm install && pnpm test && pnpm build
 ```
-
-PR titles follow [Conventional Commits](https://www.conventionalcommits.org) (`fix:`, `feat:`).
-[release-please](https://github.com/googleapis/release-please) keeps a release PR open with the
-next version and changelog; merging it publishes the release, and the plugin updates from there.
 
 ## Security and license
 
