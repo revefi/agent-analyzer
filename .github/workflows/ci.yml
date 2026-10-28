@@ -40,6 +40,29 @@ jobs:
       - name: Markdown lint
         run: pnpm dlx markdownlint-cli2@0.23.3 "**/*.md" "#node_modules"
 
+  plugin-version:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Claude Code updates an installed plugin only when its version changes, so a plugin change
+      # without a bump never reaches existing installs.
+      - name: A plugin change bumps the version
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git diff --quiet "$BASE" HEAD -- integrations/claude-code && exit 0
+          old=$(git show "$BASE:package.json" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')
+          new=$(node -p 'require("./package.json").version')
+          if [ "$old" = "$new" ]; then
+            echo "::error::integrations/claude-code changed but the version is still $new. Bump package.json and plugin.json together."
+            exit 1
+          fi
+
   secrets:
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -1,109 +1,20 @@
 name: release
 
-# Every push to main updates a release PR: the next version in package.json and plugin.json, the
-# changelog, a rebuilt plugin bundle, and the marketplace pinned to the new tag. Merging that PR
-# tags the release, and the jobs below build, verify and publish it.
 on:
   push:
-    branches: [main]
+    tags: ["v*"]
 
 permissions:
   contents: read
 
-concurrency:
-  group: release
-  cancel-in-progress: false
-
 jobs:
-  release-please:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-      issues: write
-      pull-requests: write
-    outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      sha: ${{ steps.release.outputs.sha }}
-      pr: ${{ steps.release.outputs.pr }}
-    steps:
-      - id: release
-        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
-        with:
-          # GITHUB_TOKEN works, but CI doesn't run on a PR it opens; a GitHub App token fixes that.
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
-
-  # Runs third-party and repository code on the release PR's branch, with no write access.
-  release-pr-build:
-    needs: release-please
-    if: needs.release-please.outputs.pr != ''
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
-          persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck
-      - run: pnpm test
-      - run: pnpm build
-      - name: Pin the marketplace to the release tag
-        run: |
-          version=$(node -p 'require("./package.json").version')
-          jq --arg ref "v$version" '.plugins[0].source.ref = $ref' .claude-plugin/marketplace.json > "$RUNNER_TEMP/marketplace.json"
-          mkdir -p "$RUNNER_TEMP/out"
-          cp "$RUNNER_TEMP/marketplace.json" integrations/claude-code/lib/revefi-agent-analyzer.js "$RUNNER_TEMP/out/"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-pr-files
-          path: ${{ runner.temp }}/out/
-          if-no-files-found: error
-
-  # Commits exactly the two built files to the release PR; runs no repository code.
-  release-pr-commit:
-    needs: [release-please, release-pr-build]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-pr-files
-          path: ${{ runner.temp }}/in
-      - name: Commit the bundle and marketplace pin if they changed
-        env:
-          IN: ${{ runner.temp }}/in
-        run: |
-          cp "$IN/revefi-agent-analyzer.js" integrations/claude-code/lib/revefi-agent-analyzer.js
-          cp "$IN/marketplace.json" .claude-plugin/marketplace.json
-          git diff --quiet && exit 0
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "chore: rebuild the plugin bundle and pin the marketplace to the release"
-          git push
-
   # Runs all third-party and repository code, so it gets no secrets and no write access.
   build:
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The commit release-please tagged, not the tag name: a tag can be moved.
-          ref: ${{ needs.release-please.outputs.sha }}
           persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       # No caches here: a release must not restore anything another workflow wrote.
@@ -117,7 +28,7 @@ jobs:
 
       - name: Tag matches package.json
         env:
-          TAG: ${{ needs.release-please.outputs.tag_name }}
+          TAG: ${{ github.ref_name }}
         run: |
           version=$(node -p 'require("./package.json").version')
           if [ "$TAG" != "v$version" ]; then
@@ -185,7 +96,7 @@ jobs:
 
   # Each binary must start on the platform it is for, including the macOS ones built on Linux.
   verify:
-    needs: [release-please, sign-macos]
+    needs: sign-macos
     strategy:
       matrix:
         include:
@@ -204,7 +115,7 @@ jobs:
         shell: bash
         env:
           FILE: ${{ matrix.file }}
-          TAG: ${{ needs.release-please.outputs.tag_name }}
+          TAG: ${{ github.ref_name }}
         run: |
           chmod +x "$FILE"
           if [ "$RUNNER_OS" = macOS ]; then codesign -v "$FILE"; fi
@@ -212,7 +123,7 @@ jobs:
 
   # Holds the write and signing permissions; runs no repository code and installs nothing.
   publish:
-    needs: [release-please, sign-macos, verify]
+    needs: [sign-macos, verify]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: release
@@ -221,27 +132,20 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - name: Repository is public, and the tag still names the built commit on main
+      - name: Repository is public and the tag is on main
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.release-please.outputs.tag_name }}
-          SHA: ${{ needs.release-please.outputs.sha }}
         run: |
           visibility=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)
           if [ "$visibility" != public ]; then
             echo "::error::Releases need a public repository (this one is $visibility): the installer verifies attestations from it."
             exit 1
           fi
-          tagged=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)
-          if [ "$tagged" != "$SHA" ]; then
-            echo "::error::$TAG points at $tagged, but $SHA was built"
-            exit 1
-          fi
           main=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
-          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$SHA...$main" --jq .status)
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...$main" --jq .status)
           case "$status" in
             identical | ahead) ;;
-            *) echo "::error::Built commit $SHA is not on main ($status)"; exit 1 ;;
+            *) echo "::error::Tag commit $GITHUB_SHA is not on main ($status)"; exit 1 ;;
           esac
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -254,11 +158,11 @@ jobs:
         with:
           subject-checksums: release/SHA256SUMS
 
-      # release-please drafts the release with the changelog; it goes public once the files are on it.
-      - name: Attach the files and publish the GitHub release
+      - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.release-please.outputs.tag_name }}
+          TAG: ${{ github.ref_name }}
         run: |
-          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber release/*
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          flags=""
+          case "$TAG" in *-*) flags="--prerelease" ;; esac
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --generate-notes $flags release/*
