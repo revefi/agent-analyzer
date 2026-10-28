@@ -5,6 +5,8 @@ import { humanSize, PreviewError, type PreviewMeta } from "./preview.js";
 
 export const LIMITS = {
   maxDays: 15,
+  /** A longer window is accepted when it holds at most this many sessions. */
+  sessionFloor: 15,
   maxCompressedBytes: 200 * 1024 * 1024,
   maxUncompressedBytes: 2 * 1024 * 1024 * 1024,
 };
@@ -81,7 +83,7 @@ export function buildManifest(meta: PreviewMeta, packed: Packed, client: Manifes
 
 /** The server's limits, checked before anything is sent. Returns what to tell the user, or undefined. */
 export function limitProblem(m: Pick<Manifest, "window" | "session_count" | "bytes">): string | undefined {
-  if (m.window.days > LIMITS.maxDays) {
+  if (m.window.days > LIMITS.maxDays && m.session_count > LIMITS.sessionFloor) {
     return `The window is ${m.window.days} days; the most you can analyze at once is ${LIMITS.maxDays}. Use --days ${LIMITS.maxDays} or fewer.`;
   }
   if (m.session_count === 0) {

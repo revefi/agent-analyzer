@@ -573,6 +573,7 @@ import { readdir, stat as stat2 } from "node:fs/promises";
 import { homedir as homedir2 } from "node:os";
 import { join as join3, relative, sep } from "node:path";
 import { createInterface } from "node:readline";
+var MAX_LOOKBACK_DAYS = 90;
 function defaultProjectsDir(env = process.env) {
   return join3(env.CLAUDE_CONFIG_DIR ?? join3(homedir2(), ".claude"), "projects");
 }
@@ -654,7 +655,8 @@ async function readSession(projectsDir, project, id, opts, window) {
   };
 }
 async function collect(opts) {
-  const window = windowEndingOn(opts.today, opts.days);
+  const floor = opts.minSessions ?? 0;
+  const window = windowEndingOn(opts.today, floor > 0 ? MAX_LOOKBACK_DAYS : opts.days);
   const exclude = (opts.exclude ?? []).filter((x) => x.length > 0);
   const prefix = opts.root === void 0 ? "" : foldCase(encodeProjectDir(opts.root).slice(0, 200));
   const projects = (await readdir(opts.projectsDir, { withFileTypes: true }).catch(ignoreMissing)).filter((e) => e.isDirectory() && foldCase(e.name).startsWith(prefix)).map((e) => e.name).sort();
@@ -671,7 +673,18 @@ async function collect(opts) {
       }
     }
   }
-  return { window, sessions };
+  return pick(sessions, opts.today, opts.days, floor);
+}
+var byNewest = (a, b2) => a.day === b2.day ? a.id < b2.id ? -1 : 1 : a.day > b2.day ? -1 : 1;
+function pick(sessions, today, days, floor) {
+  const window = windowEndingOn(today, days);
+  const recent = sessions.filter((s3) => s3.day >= window.start && s3.day <= today);
+  const latest = recent.length >= floor ? [] : sessions.filter((s3) => s3.day <= today).sort(byNewest).slice(0, floor);
+  const oldest = latest.at(-1)?.day;
+  if (oldest === void 0 || oldest >= window.start) return { window, sessions: recent };
+  const keep = new Set(latest);
+  const span = Math.round((Date.parse(today) - Date.parse(oldest)) / 864e5) + 1;
+  return { window: windowEndingOn(today, span), sessions: sessions.filter((s3) => keep.has(s3)) };
 }
 function archivePath(projectsDir, file) {
   return ["projects", ...relative(projectsDir, file).split(sep)].join("/");
@@ -4646,6 +4659,8 @@ function renderReport(meta) {
 // cli/src/pack.ts
 var LIMITS = {
   maxDays: 15,
+  /** A longer window is accepted when it holds at most this many sessions. */
+  sessionFloor: 15,
   maxCompressedBytes: 200 * 1024 * 1024,
   maxUncompressedBytes: 2 * 1024 * 1024 * 1024
 };
@@ -4697,7 +4712,7 @@ function buildManifest(meta, packed, client2) {
   };
 }
 function limitProblem(m2) {
-  if (m2.window.days > LIMITS.maxDays) {
+  if (m2.window.days > LIMITS.maxDays && m2.session_count > LIMITS.sessionFloor) {
     return `The window is ${m2.window.days} days; the most you can analyze at once is ${LIMITS.maxDays}. Use --days ${LIMITS.maxDays} or fewer.`;
   }
   if (m2.session_count === 0) {
@@ -4898,7 +4913,8 @@ function wholeNumber(raw, flag, fallback, min, max = Number.MAX_SAFE_INTEGER) {
   }
   return n;
 }
-var DEFAULT_DAYS = 7;
+var DEFAULT_DAYS = 15;
+var sessionFloor = (days) => days === void 0 ? LIMITS.sessionFloor : 0;
 var quote = (p2) => /^[\w./~-]+$/.test(p2) ? p2 : `"${p2.replace(/(["\\$`])/g, "\\$1")}"`;
 var COUNT_LABELS = {
   "private-key": ["private key", "private keys"],
@@ -4937,8 +4953,8 @@ function redactionLine(meta) {
   if (other) parts.push(`${other} other secret${other === 1 ? "" : "s"} or blobs`);
   return parts.length ? `Removed: ${parts.join(", ")}` : "No known secrets or personal data found.";
 }
-function scopeTotals(path, sessions) {
-  const inside = sessions.filter((s3) => inRoot(s3.cwd, path, s3.project));
+function scopeTotals(path, sessions, pickFrom) {
+  const inside = pickFrom(sessions.filter((s3) => inRoot(s3.cwd, path, s3.project)));
   return {
     path,
     sessions: inside.length,
@@ -4968,7 +4984,8 @@ async function prepareFrom(e, values) {
     root: all ? void 0 : scopeRoot,
     days,
     today: utcToday(),
-    exclude: values["exclude-session"]
+    exclude: values["exclude-session"],
+    minSessions: sessionFloor(values.days)
   });
   if (sessions.length === 0 && values.project !== void 0) {
     throw new UserError(
@@ -5182,13 +5199,16 @@ var COMMANDS = {
     async run(args, e) {
       const { values } = parse(args, { days: SCOPE_OPTIONS.days, json: { type: "boolean" } });
       const days = wholeNumber(values.days, "--days", DEFAULT_DAYS, 1, LIMITS.maxDays);
-      const { window, sessions } = await collect({ projectsDir: defaultProjectsDir(e.env), days, today: utcToday() });
-      const projects = [...new Set(sessions.flatMap((s3) => s3.cwd === void 0 ? [] : [s3.cwd]))].map((path) => scopeTotals(path, sessions)).sort((a, b2) => b2.bytes - a.bytes || a.path.localeCompare(b2.path));
+      const [floor, today] = [sessionFloor(values.days), utcToday()];
+      const scanned = (await collect({ projectsDir: defaultProjectsDir(e.env), days: floor > 0 ? MAX_LOOKBACK_DAYS : days, today })).sessions;
+      const pickFrom = (s3) => pick(s3, today, days, floor).sessions;
+      const { window, sessions } = pick(scanned, today, days, floor);
+      const projects = [...new Set(sessions.flatMap((s3) => s3.cwd === void 0 ? [] : [s3.cwd]))].map((path) => scopeTotals(path, scanned, pickFrom)).sort((a, b2) => b2.bytes - a.bytes || a.path.localeCompare(b2.path));
       if (values.json) {
         e.io.out(
           JSON.stringify({
-            current_directory: scopeTotals(e.cwd, sessions),
-            current_project: scopeTotals(projectRoot(e.cwd), sessions),
+            current_directory: scopeTotals(e.cwd, scanned, pickFrom),
+            current_project: scopeTotals(projectRoot(e.cwd), scanned, pickFrom),
             all: { sessions: sessions.length, bytes: sessions.reduce((a, s3) => a + s3.bytes, 0) },
             window,
             projects
@@ -5372,7 +5392,7 @@ async function askYesNo(question) {
 }
 
 // cli/src/main.ts
-var VERSION = true ? "0.4.7" : "0.0.0-dev";
+var VERSION = true ? "0.5.0" : "0.0.0-dev";
 var USAGE = `Usage: revefi-agent-analyzer <command> [options]
 
 Find repeated work and wasted spend in your Claude Code sessions.
@@ -5381,7 +5401,8 @@ Commands:
 ${Object.entries(COMMANDS).map(([name, c]) => `  ${name.padEnd(17)}${c.summary}`).join("\n")}
 
 Options for analyze, prepare and projects:
-  --days N               Days of history to analyze, 1-15 (default 7; projects takes only this)
+  --days N               Days of history to analyze, 1-15 (default 15, or the latest 15
+                         sessions if those days have fewer; projects takes only this)
   --all-projects         Every project on this machine, not just this repository
   --project DIR          Sessions started in DIR or below it, instead of this repository
   --exclude-session ID   Leave a session out (repeatable; a prefix of the id is enough)

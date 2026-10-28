@@ -17,7 +17,7 @@ import {
   type Sharing,
 } from "./api.js";
 import { Auth, canonicalHost, type PendingLogin, SignInError } from "./auth.js";
-import { collect, defaultProjectsDir, inRoot, type Session, utcToday } from "./collect.js";
+import { collect, defaultProjectsDir, inRoot, MAX_LOOKBACK_DAYS, pick, type Session, utcToday } from "./collect.js";
 import { buildManifest, LIMITS, limitProblem, pack } from "./pack.js";
 import { applyErrorPicks, parsePicks } from "./errorpick.js";
 import { ERROR_CANDIDATES, humanSize, type PreviewMeta, readPreview, REPORT_FILE, writePreview } from "./preview.js";
@@ -183,8 +183,10 @@ function wholeNumber(raw: string | undefined, flag: string, fallback: number, mi
   return n;
 }
 
-/** A week by default; up to `LIMITS.maxDays` when asked for. */
-export const DEFAULT_DAYS = 7;
+export const DEFAULT_DAYS = 15;
+
+/** Without --days, quiet recent days are topped up to this many sessions; --days is taken as asked. */
+const sessionFloor = (days: string | undefined) => (days === undefined ? LIMITS.sessionFloor : 0);
 
 const quote = (p: string) => (/^[\w./~-]+$/.test(p) ? p : `"${p.replace(/(["\\$`])/g, "\\$1")}"`);
 
@@ -236,9 +238,9 @@ interface Prepared {
   scope: string;
 }
 
-/** What `--project path` would scan: sessions started in path or below it. */
-function scopeTotals(path: string, sessions: Session[]) {
-  const inside = sessions.filter((s) => inRoot(s.cwd, path, s.project));
+/** What `--project path` would scan: `pickFrom` of the sessions started in path or below it. */
+function scopeTotals(path: string, sessions: Session[], pickFrom: (s: Session[]) => Session[]) {
+  const inside = pickFrom(sessions.filter((s) => inRoot(s.cwd, path, s.project)));
   return {
     path,
     sessions: inside.length,
@@ -276,6 +278,7 @@ async function prepareFrom(
     days,
     today: utcToday(),
     exclude: values["exclude-session"],
+    minSessions: sessionFloor(values.days),
   });
   if (sessions.length === 0 && values.project !== undefined) {
     throw new UserError(
@@ -516,15 +519,18 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
     async run(args, e) {
       const { values } = parse(args, { days: SCOPE_OPTIONS.days, json: { type: "boolean" } });
       const days = wholeNumber(values.days, "--days", DEFAULT_DAYS, 1, LIMITS.maxDays);
-      const { window, sessions } = await collect({ projectsDir: defaultProjectsDir(e.env), days, today: utcToday() });
+      const [floor, today] = [sessionFloor(values.days), utcToday()];
+      const scanned = (await collect({ projectsDir: defaultProjectsDir(e.env), days: floor > 0 ? MAX_LOOKBACK_DAYS : days, today })).sessions;
+      const pickFrom = (s: Session[]) => pick(s, today, days, floor).sessions;
+      const { window, sessions } = pick(scanned, today, days, floor);
       const projects = [...new Set(sessions.flatMap((s) => (s.cwd === undefined ? [] : [s.cwd])))]
-        .map((path) => scopeTotals(path, sessions))
+        .map((path) => scopeTotals(path, scanned, pickFrom))
         .sort((a, b) => b.bytes - a.bytes || a.path.localeCompare(b.path));
       if (values.json) {
         e.io.out(
           JSON.stringify({
-            current_directory: scopeTotals(e.cwd, sessions),
-            current_project: scopeTotals(projectRoot(e.cwd), sessions),
+            current_directory: scopeTotals(e.cwd, scanned, pickFrom),
+            current_project: scopeTotals(projectRoot(e.cwd), scanned, pickFrom),
             all: { sessions: sessions.length, bytes: sessions.reduce((a, s) => a + s.bytes, 0) },
             window,
             projects,
