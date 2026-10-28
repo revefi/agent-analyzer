@@ -8,7 +8,12 @@
   "plugins": [
     {
       "name": "revefi",
-      "source": "./integrations/claude-code",
+      "source": {
+        "source": "git-subdir",
+        "url": "revefi/agent-analyzer",
+        "path": "integrations/claude-code",
+        "ref": "v0.4.7"
+      },
       "description": "Find repeated work and wasted spend in your Claude Code sessions, with concrete fixes"
     }
   ]
