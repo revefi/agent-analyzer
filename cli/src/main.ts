@@ -26,7 +26,7 @@ Options for analyze, prepare and projects:
   --exclude-session ID   Leave a session out (repeatable; a prefix of the id is enough)
 
 Options for login:
-  --start                Print the sign-in link and code, then exit (--json for a script)
+  --start                Print the sign-in link and code, open it, then exit (--json for a script)
   --wait                 Wait for a started sign-in to be approved
   --no-browser           Don't open the browser; just print the link
 

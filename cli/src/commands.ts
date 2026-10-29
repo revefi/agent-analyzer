@@ -120,8 +120,8 @@ function auth(e: Env, api?: string): Auth {
 
 /** Opens the sign-in page without a shell, so the URL is never interpreted as a command. */
 function openInBrowser(url: string): void {
-  // Over SSH with no display, xdg-open can start a text browser nobody sees.
-  if (process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return;
+  // Over SSH the browser would open on the remote machine, or as a text browser nobody sees.
+  if (process.env.SSH_CONNECTION || (process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY)) return;
   const [cmd, args] =
     process.platform === "darwin"
       ? ["open", [url]]
@@ -455,6 +455,7 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
       const a = auth(e, values.api);
       if (values.start) {
         const pending = await a.startLogin();
+        if (!values["no-browser"]) (e.openUrl ?? openInBrowser)(pending.verification_uri_complete);
         if (values.json) {
           e.io.out(
             JSON.stringify({
