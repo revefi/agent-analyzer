@@ -3,7 +3,8 @@ import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { pipeline } from "node:stream/promises";
-import { archivePath, type Session, type Window } from "./collect.js";
+import { createGzip } from "node:zlib";
+import { archivePath, type Session, type Window, windowEndingOn } from "./collect.js";
 import {
   aliasProjectDir,
   type Counts,
@@ -51,6 +52,8 @@ export interface WritePreviewOptions {
   revefiDir: string;
   home?: string;
   now?: Date;
+  /** Keep the newest sessions whose gzipped size fits; the rest are left out and the window narrows. */
+  maxCompressedBytes?: number;
 }
 
 const add = (into: Counts, from: Counts) => {
@@ -164,9 +167,26 @@ async function previewSession(
   };
 }
 
+async function removeSession(dir: string, s: Session, home?: string): Promise<void> {
+  const projectDir = join(dir, "projects", aliasProjectDir(s.project, home));
+  await rm(join(projectDir, `${s.id}.jsonl`), { force: true });
+  await rm(join(projectDir, s.id), { recursive: true, force: true });
+}
+
+/** Gzipped size of the files, at the level the upload archive uses: a close estimate of their share of it. */
+async function gzippedSize(dir: string, paths: string[]): Promise<number> {
+  let size = 0;
+  for (const p of paths) {
+    for await (const chunk of createReadStream(join(dir, ...p.split("/"))).pipe(createGzip())) size += (chunk as Buffer).length;
+    // The archive also carries a tar header per file; counting a whole one keeps the estimate above it.
+    size += 512;
+  }
+  return size;
+}
+
 export async function writePreview(
   opts: WritePreviewOptions,
-): Promise<{ dir: string; meta: PreviewMeta }> {
+): Promise<{ dir: string; meta: PreviewMeta; sessions: Session[] }> {
   await ensureIgnored(opts.revefiDir);
   const base = join(opts.revefiDir, "upload-preview");
   await mkdirNoSymlink(base);
@@ -180,7 +200,13 @@ export async function writePreview(
       bytes: 0,
     };
     const candidates: FileErrorCandidate[] = [];
-    for (const s of opts.sessions) {
+    const kept: { at: number; s: Session; ps: PreviewSession; found: FileErrorCandidate[] }[] = [];
+    const budget = opts.maxCompressedBytes ?? Infinity;
+    let compressed = 0;
+    let trimmed = false;
+    const newestFirst = opts.sessions.map((s, at) => ({ s, at })).sort((a, b) => (a.s.day === b.s.day ? a.at - b.at : a.s.day > b.s.day ? -1 : 1));
+    for (const { s, at } of newestFirst) {
+      if (trimmed) break;
       let ps: PreviewSession;
       const found: FileErrorCandidate[] = [];
       try {
@@ -188,25 +214,30 @@ export async function writePreview(
       } catch (err) {
         // Claude Code may have deleted the session since it was found; leave it out.
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-        await rm(
-          join(
-            dir,
-            "projects",
-            aliasProjectDir(s.project, opts.home),
-            `${s.id}.jsonl`,
-          ),
-          { force: true },
-        );
-        await rm(
-          join(dir, "projects", aliasProjectDir(s.project, opts.home), s.id),
-          { recursive: true, force: true },
-        );
+        await removeSession(dir, s, opts.home);
         continue;
       }
+      if (budget !== Infinity) {
+        compressed += await gzippedSize(dir, ps.paths);
+        if (compressed > budget && kept.length > 0) {
+          await removeSession(dir, s, opts.home);
+          trimmed = true;
+          continue;
+        }
+      }
+      kept.push({ at, s, ps, found });
+    }
+    kept.sort((a, b) => a.at - b.at);
+    for (const { ps, found } of kept) {
       meta.sessions.push(ps);
       add(meta.counts, ps.counts);
       meta.bytes += ps.bytes;
       candidates.push(...found);
+    }
+    const oldest = meta.sessions.reduce<string | undefined>((min, x) => (min === undefined || x.day < min ? x.day : min), undefined);
+    if (trimmed && oldest !== undefined) {
+      const span = Math.round((Date.parse(opts.window.end) - Date.parse(oldest)) / 86_400_000) + 1;
+      if (span < opts.window.days) meta.window = windowEndingOn(opts.window.end, span);
     }
     if (candidates.length) {
       meta.error_messages = { failed: candidates.length, picked_by_model: 0 };
@@ -224,7 +255,7 @@ export async function writePreview(
     await writeFile(join(dir, REPORT_FILE), renderReport(meta), {
       mode: 0o600,
     });
-    return { dir, meta };
+    return { dir, meta, sessions: kept.map((k) => k.s) };
   } catch (err) {
     await rm(dir, { recursive: true, force: true });
     throw err;

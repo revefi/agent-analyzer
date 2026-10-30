@@ -129,7 +129,7 @@ describe("prepare then upload (the plugin's path)", () => {
     const prep = await run(["prepare", "--json"]);
     expect(prep.code).toBe(0);
     const p = JSON.parse(prep.out) as { preview_dir: string; sessions: number; upload_to: string };
-    expect(p).toMatchObject({ sessions: 1, upload_to: "api.test", session_list: [{ id: "s1", day: utcToday() }] });
+    expect(p).toMatchObject({ sessions: 1, left_out: 0, upload_to: "api.test", session_list: [{ id: "s1", day: utcToday() }] });
 
     const up = await run(["upload", p.preview_dir, "--yes", "--json"], { env: { CLAUDECODE: "1" } });
     expect(up.code).toBe(0);
@@ -491,10 +491,10 @@ describe("choosing what to scan", () => {
       projects: Totals[];
     };
 
-  it("scans 15 days by default, or as many as asked", async () => {
+  it("scans 14 days by default, or as many as asked", async () => {
     const days = async (...args: string[]) =>
       (JSON.parse((await run(["projects", "--json", ...args], { cwd: repo })).out) as { window: { days: number } }).window.days;
-    expect(await days()).toBe(15);
+    expect(await days()).toBe(14);
     expect(await days("--days", "3")).toBe(3);
   });
 

@@ -21,7 +21,7 @@ Rules that hold throughout:
 - Never paste the user's words into a command. Turn them into these flags only, and say which
   words you ignored: `--all-projects`, `--project 'PATH'` (only a `path` from the `projects`
   output, from `current_directory`, a `projects` entry or `current_project`, copied exactly,
-  never one containing `'`), `--days N` (a whole number from 1 to 15), and
+  never one containing `'`), `--days N` (a whole number from 1 to 14), and
   `--exclude-session 'ID'` (repeatable). No other flags.
 - Single-quote every path, id and URL you put in a command.
 - Every link you show the user (the sign-in link, the report link) goes on a line of its own, as
@@ -74,10 +74,10 @@ revefi-agent-analyzer projects --json [--days N]
 
 The JSON has `window`, `all` (every session), and three kinds of entry, each with `path`,
 `sessions`, `bytes` and `last_day`: `current_directory`, `current_project` (the repository it is
-in), and `projects` (each folder a session started in, largest first). An entry counts the
-sessions that started in that folder or below it, which is exactly what `--project` with that
-path scans. If `all.sessions` is 0, tell the user there are no Claude Code sessions in that window
-and stop. When you show a path, write the home folder as `~`.
+in), and `projects` (each folder a session started in, largest first). An entry counts the sessions
+that started in that folder or below it, which is what `--project` with that path scans before the
+upload size limit. If `all.sessions` is 0, tell the user there are no Claude Code sessions in that
+window and stop. When you show a path, write the home folder as `~`.
 
 If the user's words already chose ("all projects", "this project", "this directory"), use that
 and skip the question. If they named a project, go straight to matching it, below. Otherwise ask
@@ -107,10 +107,10 @@ The choice becomes the flag for step 2: `--project` with `current_directory`'s p
 revefi-agent-analyzer prepare --json <flags>
 ```
 
-The JSON has `preview_dir`, `report`, `scope`, `window`, `sessions`, `session_list` (id,
-project, day, bytes), `bytes_before`, `bytes_after`, `redactions` (counts by kind) and
-`upload_to` (the server it would go to), `failed_tool_calls`, and `error_candidates` (a local
-file, or null when no call failed).
+The JSON has `preview_dir`, `report`, `scope`, `window`, `sessions`, `session_list` (id, project,
+day, bytes), `left_out` (older sessions left out to keep the upload under its size limit),
+`bytes_before`, `bytes_after`, `redactions` (counts by kind) and `upload_to` (the server it would go
+to), `failed_tool_calls`, and `error_candidates` (a local file, or null when no call failed).
 
 ### Pick the error lines
 
@@ -131,7 +131,8 @@ call then keeps the few lines a fixed rule picked. Either way, carry on to conse
 Tell the user, in a few lines:
 
 - the scope (`scope`), how many sessions, from which dates, and the size before and after
-  redaction;
+  redaction; when `left_out` is above 0, that many older sessions were left out to keep the upload
+  under its size limit;
 - that the upload contains their prompts, Claude's replies and the commands and code Claude ran
   or wrote, but not the output of those tools, only the error message when a call failed, with
   known secrets and personal data removed (list what `redactions` found, in plain words), and
@@ -145,9 +146,10 @@ with the options "Upload", "Don't upload" and "Leave some sessions out first".
 
 - "Don't upload": say nothing was sent, give the `preview_dir` path, and offer to delete that
   folder.
-- "Leave some sessions out first": ask with AskUserQuestion (multiSelect) which sessions to
-  leave out, one option per `session_list` entry (largest first, labelled with day and size),
-  then run step 2's `prepare` again, adding `--exclude-session` for each, and ask again.
+- "Leave some sessions out first": in a plain message, list the `session_list` entries largest
+  first, numbered, with day and size (at most 20; say how many more there are), and ask which to
+  leave out by number. Then run step 2's `prepare` again, adding `--exclude-session` for each, and
+  ask again.
 
 ## 4. Upload, then follow the run
 

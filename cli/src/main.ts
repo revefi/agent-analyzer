@@ -19,8 +19,9 @@ ${Object.entries(COMMANDS)
   .join("\n")}
 
 Options for analyze, prepare and projects:
-  --days N               Days of history to analyze, 1-15 (default 15, or the latest 15
-                         sessions if those days have fewer; projects takes only this)
+  --days N               Days of history to analyze, 1-14 (default 14, or the latest 100
+                         sessions if those days have fewer; newest first, up to 200 MB
+                         compressed; projects takes only this)
   --all-projects         Every project on this machine, not just this repository
   --project DIR          Sessions started in DIR or below it, instead of this repository
   --exclude-session ID   Leave a session out (repeatable; a prefix of the id is enough)

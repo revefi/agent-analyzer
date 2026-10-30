@@ -163,6 +163,37 @@ describe("writePreview", () => {
     const left = (await import("node:fs")).readdirSync(join(revefiDir, "upload-preview"));
     expect(left).toEqual([]);
   });
+  it("keeps the newest sessions that fit the compressed limit, narrowing the window to them", async () => {
+    const dir = join(tmp, "budget", "projects");
+    const proj = join(dir, encodeProjectDir(ROOT));
+    mkdirSync(proj, { recursive: true });
+    let seed = 1;
+    const word = () => `w${(seed = (seed * 16807) % 2147483647) % 5000}`;
+    const days = ["2026-09-30", "2026-09-28", "2026-09-20"];
+    days.forEach((day, i) => {
+      const text = Array.from({ length: 20_000 }, word).join(" ");
+      writeFileSync(join(proj, `b${i}.jsonl`), line({ type: "user", cwd: ROOT, timestamp: `${day}T10:00:00Z`, message: { content: text } }));
+    });
+    const found = (await collect({ projectsDir: dir, root: ROOT, days: 14, today: "2026-10-01" })).sessions;
+    const window = { days: 14, start: "2026-09-18", end: "2026-10-01" };
+    const write = (ss: Session[], maxCompressedBytes?: number) =>
+      writePreview({ projectsDir: dir, window, sessions: ss, revefiDir: join(tmp, "budget", ".revefi"), home: HOME, maxCompressedBytes });
+    const two = await write(found.filter((x) => x.id !== "b2"));
+    const twoSize = (await pack(two.dir, two.meta, join(tmp, "budget", "two.tgz"))).compressed;
+
+    const trimmed = await write(found, twoSize * 1.05);
+    expect(trimmed.meta.sessions.map((x) => x.id).sort()).toEqual(["b0", "b1"]);
+    expect(trimmed.sessions.map((x) => x.id).sort()).toEqual(["b0", "b1"]);
+    expect(trimmed.meta.counts).toEqual(two.meta.counts);
+    expect(trimmed.meta.window).toEqual({ days: 4, start: "2026-09-28", end: "2026-10-01" });
+    expect(readdirSync(join(trimmed.dir, "projects", ALIAS)).sort()).toEqual(["b0.jsonl", "b1.jsonl"]);
+    expect((await pack(trimmed.dir, trimmed.meta, join(tmp, "budget", "t.tgz"))).compressed).toBeLessThanOrEqual(twoSize * 1.05);
+
+    expect((await write(found, 1)).meta.sessions.map((x) => x.id)).toEqual(["b0"]);
+    const all = await write(found, twoSize * 10);
+    expect(all.meta.sessions).toHaveLength(3);
+    expect(all.meta.window).toEqual(window);
+  });
 });
 
 describe("pack", () => {
@@ -207,13 +238,13 @@ describe("limitProblem", () => {
 
   it("checks the window before emptiness, and only suggests a longer window when allowed", () => {
     const long = { ...ok.window, days: 30 };
-    expect(limitProblem({ ...ok, session_count: LIMITS.sessionFloor + 1, window: long })).toMatch(/--days 15 or fewer/);
+    expect(limitProblem({ ...ok, session_count: LIMITS.sessionFloor + 1, window: long })).toMatch(/--days 14 or fewer/);
     expect(limitProblem({ ...ok, session_count: LIMITS.sessionFloor, window: long })).toBeUndefined();
     expect(limitProblem({ ...ok, session_count: 0 })).toBe(
-      "No Claude Code sessions started between 2026-09-25 and 2026-10-01 here. Try --all-projects or --days 15.",
+      "No Claude Code sessions started between 2026-09-25 and 2026-10-01 here. Try --all-projects or --days 14.",
     );
     expect(
-      limitProblem({ ...ok, session_count: 0, window: { days: 15, start: "2026-09-17", end: "2026-10-01" } }),
+      limitProblem({ ...ok, session_count: 0, window: { days: 14, start: "2026-09-18", end: "2026-10-01" } }),
     ).toMatch(/Try --all-projects\.$/);
   });
 
