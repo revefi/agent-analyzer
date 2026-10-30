@@ -317,7 +317,7 @@ export class Auth {
 
   private async expired(): Promise<SignInError> {
     await rm(this.file(PENDING), { force: true });
-    return new SignInError(`The sign-in code expired. Run \`${this.login}\` again.`);
+    return new SignInError(`The sign-in code expired. Run \`${this.login}\` again.`, "signed_out");
   }
 
   /** Waits for the user to approve the pending login, then stores the refresh token. */

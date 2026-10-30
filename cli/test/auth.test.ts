@@ -111,7 +111,10 @@ describe("Auth device login", () => {
       "POST /oauth/token": () => json(403, { error: "expired_token" }),
     });
     await auth.startLogin();
-    await expect(auth.finishLogin()).rejects.toThrow("The sign-in code expired. Run `revefi-agent-analyzer login` again.");
+    await expect(auth.finishLogin()).rejects.toMatchObject({
+      message: "The sign-in code expired. Run `revefi-agent-analyzer login` again.",
+      reason: "signed_out",
+    });
   });
 
   it("stops waiting at the timeout and keeps the sign-in so --wait can resume it", async () => {

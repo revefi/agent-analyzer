@@ -61,9 +61,10 @@ revefi-agent-analyzer login --wait --json --timeout 420
 
 It prints the `email` once they approve; then carry on with what they asked for. If the error kind
 is `sign_in_pending`, they haven't approved yet: say so, show the link again and end your turn, then
-run the same command on their next reply. Never run `login --start` again while waiting; a new code
-would replace the one they are approving. If it fails any other way, show `error.message` and tell
-the user to run `revefi-agent-analyzer login` in a terminal, then stop.
+run the same command on their next reply. If it is `sign_in`, the code expired: start again with
+`login --start`, once. Never run `login --start` while a code is still waiting; a new code would
+replace the one they are approving. If it fails any other way, show `error.message` and tell the
+user to run `revefi-agent-analyzer login` in a terminal, then stop.
 
 ## 1. Choose what to scan
 

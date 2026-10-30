@@ -373,7 +373,6 @@ describe("sign-in", () => {
     expect(start.opened).toEqual(["https://auth.test/activate?user_code=ABCD-EFGH"]);
     rmSync(join(tmp, "config"), { recursive: true, force: true });
     expect((await run(["login", "--start", "--json", "--no-browser"], { srv: fakeFetch(AUTH0) })).opened).toEqual([]);
-    await run(["login", "--start", "--json"], { srv: fakeFetch(AUTH0) });
 
     const done = await run(["login", "--wait", "--json"], { srv: fakeFetch(AUTH0) });
     expect(done.code).toBe(0);

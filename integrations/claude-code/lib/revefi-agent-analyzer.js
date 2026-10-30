@@ -242,7 +242,7 @@ var Auth = class {
   }
   async expired() {
     await rm(this.file(PENDING), { force: true });
-    return new SignInError(`The sign-in code expired. Run \`${this.login}\` again.`);
+    return new SignInError(`The sign-in code expired. Run \`${this.login}\` again.`, "signed_out");
   }
   /** Waits for the user to approve the pending login, then stores the refresh token. */
   async finishLogin(opts = {}) {
@@ -5393,7 +5393,7 @@ async function askYesNo(question) {
 }
 
 // cli/src/main.ts
-var VERSION = true ? "0.5.1" : "0.0.0-dev";
+var VERSION = true ? "0.5.2" : "0.0.0-dev";
 var USAGE = `Usage: revefi-agent-analyzer <command> [options]
 
 Find repeated work and wasted spend in your Claude Code sessions.
