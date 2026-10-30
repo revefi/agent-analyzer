@@ -1,14 +1,15 @@
 import { realpath, stat } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { create } from "tar";
+import { MAX_UPLOAD_BYTES } from "./collect.js";
 import { humanSize, PreviewError, type PreviewMeta } from "./preview.js";
 
 export const LIMITS = {
-  maxDays: 15,
+  maxDays: 14,
   /** A longer window is accepted when it holds at most this many sessions. */
-  sessionFloor: 15,
+  sessionFloor: 100,
   maxCompressedBytes: 200 * 1024 * 1024,
-  maxUncompressedBytes: 2 * 1024 * 1024 * 1024,
+  maxUncompressedBytes: MAX_UPLOAD_BYTES,
 };
 
 export interface Manifest {

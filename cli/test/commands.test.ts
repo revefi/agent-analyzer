@@ -491,10 +491,10 @@ describe("choosing what to scan", () => {
       projects: Totals[];
     };
 
-  it("scans 15 days by default, or as many as asked", async () => {
+  it("scans 14 days by default, or as many as asked", async () => {
     const days = async (...args: string[]) =>
       (JSON.parse((await run(["projects", "--json", ...args], { cwd: repo })).out) as { window: { days: number } }).window.days;
-    expect(await days()).toBe(15);
+    expect(await days()).toBe(14);
     expect(await days("--days", "3")).toBe(3);
   });
 

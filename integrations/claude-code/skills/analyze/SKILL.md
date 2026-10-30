@@ -21,7 +21,7 @@ Rules that hold throughout:
 - Never paste the user's words into a command. Turn them into these flags only, and say which
   words you ignored: `--all-projects`, `--project 'PATH'` (only a `path` from the `projects`
   output, from `current_directory`, a `projects` entry or `current_project`, copied exactly,
-  never one containing `'`), `--days N` (a whole number from 1 to 15), and
+  never one containing `'`), `--days N` (a whole number from 1 to 14), and
   `--exclude-session 'ID'` (repeatable). No other flags.
 - Single-quote every path, id and URL you put in a command.
 - Every link you show the user (the sign-in link, the report link) goes on a line of its own, as

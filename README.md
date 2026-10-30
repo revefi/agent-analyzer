@@ -23,9 +23,10 @@ flowchart LR
 ```
 
 Then run `/revefi:analyze` in any repository. It asks which sessions to scan (this directory,
-this project, one you name, or all) and covers the last 15 days or your 15 latest sessions,
-whichever is more. The first time, it has you sign in with Google or an emailed code. Needs
-Node.js 22.12 or newer, and Claude Code in a terminal or an IDE.
+this project, one you name, or all) and covers the last 14 days or your 100 latest sessions,
+whichever is more, keeping the newest that fit in 200 MB compressed. The first time, it has you
+sign in with Google or an emailed code. Needs Node.js 22.12 or newer, and Claude Code in a
+terminal or an IDE.
 
 ## Redaction
 

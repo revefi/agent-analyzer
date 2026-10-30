@@ -183,7 +183,7 @@ function wholeNumber(raw: string | undefined, flag: string, fallback: number, mi
   return n;
 }
 
-export const DEFAULT_DAYS = 15;
+export const DEFAULT_DAYS = 14;
 
 /** Without --days, quiet recent days are topped up to this many sessions; --days is taken as asked. */
 const sessionFloor = (days: string | undefined) => (days === undefined ? LIMITS.sessionFloor : 0);
@@ -287,9 +287,18 @@ async function prepareFrom(
   }
   const empty = limitProblem({ window, session_count: sessions.length, bytes: { compressed: 0, uncompressed: 0 } });
   if (empty) throw new UserError(empty);
-  const { dir, meta } = await writePreview({ projectsDir, window, sessions, revefiDir: join(root, ".revefi"), home: homedir() });
+  const { dir, meta } = await writePreview({
+    projectsDir,
+    window,
+    sessions,
+    revefiDir: join(root, ".revefi"),
+    home: homedir(),
+    maxCompressedBytes: LIMITS.maxCompressedBytes,
+  });
   await writeFile(join(dir, UPLOAD_TO), `${new URL(apiBase(e, values.api)).host}\n`, { mode: 0o600 });
-  return { dir, meta, sourceBytes: sessions.reduce((a, s) => a + s.bytes, 0), scope: all ? "all projects on this machine" : scopeRoot };
+  const sent = new Set(meta.sessions.map((s) => s.id));
+  const sourceBytes = sessions.filter((s) => sent.has(s.id)).reduce((a, s) => a + s.bytes, 0);
+  return { dir, meta, sourceBytes, scope: all ? "all projects on this machine" : scopeRoot };
 }
 
 function describePreview(e: Env, p: { dir: string; meta: PreviewMeta; sourceBytes?: number; scope?: string }, api: string): void {

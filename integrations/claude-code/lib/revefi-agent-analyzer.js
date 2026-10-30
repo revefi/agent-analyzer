@@ -676,15 +676,20 @@ async function collect(opts) {
   return pick(sessions, opts.today, opts.days, floor);
 }
 var byNewest = (a, b2) => a.day === b2.day ? a.id < b2.id ? -1 : 1 : a.day > b2.day ? -1 : 1;
+var MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 function pick(sessions, today, days, floor) {
   const window = windowEndingOn(today, days);
   const recent = sessions.filter((s3) => s3.day >= window.start && s3.day <= today);
-  const latest = recent.length >= floor ? [] : sessions.filter((s3) => s3.day <= today).sort(byNewest).slice(0, floor);
-  const oldest = latest.at(-1)?.day;
-  if (oldest === void 0 || oldest >= window.start) return { window, sessions: recent };
-  const keep = new Set(latest);
+  const chosen = recent.length >= floor ? recent : sessions.filter((s3) => s3.day <= today).sort(byNewest).slice(0, floor);
+  let total = 0;
+  const keep = new Set(
+    [...chosen].sort(byNewest).filter((s3, i) => (total += s3.bytes) <= MAX_UPLOAD_BYTES || i === 0)
+  );
+  const kept = sessions.filter((s3) => keep.has(s3));
+  const oldest = kept.reduce((min, s3) => min === void 0 || s3.day < min ? s3.day : min, void 0);
+  if (oldest === void 0 || oldest >= window.start) return { window, sessions: kept };
   const span = Math.round((Date.parse(today) - Date.parse(oldest)) / 864e5) + 1;
-  return { window: windowEndingOn(today, span), sessions: sessions.filter((s3) => keep.has(s3)) };
+  return { window: windowEndingOn(today, span), sessions: kept };
 }
 function archivePath(projectsDir, file) {
   return ["projects", ...relative(projectsDir, file).split(sep)].join("/");
@@ -3668,7 +3673,9 @@ import { createReadStream as createReadStream2, createWriteStream } from "node:f
 import { lstat, mkdir as mkdir2, mkdtemp, readFile as readFile2, rename as rename2, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
 import { dirname, join as join4 } from "node:path";
 import { createInterface as createInterface2 } from "node:readline";
+import { Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { createGzip } from "node:zlib";
 
 // cli/src/pii.ts
 import { isIPv4, isIPv6 } from "node:net";
@@ -4490,6 +4497,22 @@ async function previewSession(dir, s3, opts, candidates) {
     counts
   };
 }
+async function removeSession(dir, s3, home) {
+  const projectDir = join4(dir, "projects", aliasProjectDir(s3.project, home));
+  await rm2(join4(projectDir, `${s3.id}.jsonl`), { force: true });
+  await rm2(join4(projectDir, s3.id), { recursive: true, force: true });
+}
+async function gzippedSize(dir, paths) {
+  let size = 0;
+  const count = new Writable({
+    write(chunk, _enc, done) {
+      size += chunk.length;
+      done();
+    }
+  });
+  for (const p2 of paths) await pipeline(createReadStream2(join4(dir, ...p2.split("/"))), createGzip(), count, { end: false });
+  return size;
+}
 async function writePreview(opts) {
   await ensureIgnored(opts.revefiDir);
   const base = join4(opts.revefiDir, "upload-preview");
@@ -4504,32 +4527,42 @@ async function writePreview(opts) {
       bytes: 0
     };
     const candidates = [];
-    for (const s3 of opts.sessions) {
+    const kept = [];
+    const budget = opts.maxCompressedBytes ?? Infinity;
+    let compressed = 0;
+    let trimmed = false;
+    const newestFirst = opts.sessions.map((s3, at2) => ({ s: s3, at: at2 })).sort((a, b2) => a.s.day === b2.s.day ? a.at - b2.at : a.s.day > b2.s.day ? -1 : 1);
+    for (const { s: s3, at: at2 } of newestFirst) {
+      if (trimmed) break;
       let ps2;
       const found = [];
       try {
         ps2 = await previewSession(dir, s3, opts, found);
       } catch (err) {
         if (err.code !== "ENOENT") throw err;
-        await rm2(
-          join4(
-            dir,
-            "projects",
-            aliasProjectDir(s3.project, opts.home),
-            `${s3.id}.jsonl`
-          ),
-          { force: true }
-        );
-        await rm2(
-          join4(dir, "projects", aliasProjectDir(s3.project, opts.home), s3.id),
-          { recursive: true, force: true }
-        );
+        await removeSession(dir, s3, opts.home);
         continue;
       }
+      if (budget !== Infinity) {
+        compressed += await gzippedSize(dir, ps2.paths);
+        if (compressed > budget && kept.length > 0) {
+          await removeSession(dir, s3, opts.home);
+          trimmed = true;
+          continue;
+        }
+      }
+      kept.push({ at: at2, ps: ps2, found });
+    }
+    for (const { ps: ps2, found } of kept.sort((a, b2) => a.at - b2.at)) {
       meta.sessions.push(ps2);
       add(meta.counts, ps2.counts);
       meta.bytes += ps2.bytes;
       candidates.push(...found);
+    }
+    const oldest = meta.sessions.reduce((min, x) => min === void 0 || x.day < min ? x.day : min, void 0);
+    if (trimmed && oldest !== void 0) {
+      const span = Math.round((Date.parse(opts.window.end) - Date.parse(oldest)) / 864e5) + 1;
+      if (span < opts.window.days) meta.window = windowEndingOn(opts.window.end, span);
     }
     if (candidates.length) {
       meta.error_messages = { failed: candidates.length, picked_by_model: 0 };
@@ -4658,11 +4691,11 @@ function renderReport(meta) {
 
 // cli/src/pack.ts
 var LIMITS = {
-  maxDays: 15,
+  maxDays: 14,
   /** A longer window is accepted when it holds at most this many sessions. */
-  sessionFloor: 15,
+  sessionFloor: 100,
   maxCompressedBytes: 200 * 1024 * 1024,
-  maxUncompressedBytes: 2 * 1024 * 1024 * 1024
+  maxUncompressedBytes: MAX_UPLOAD_BYTES
 };
 async function pack(previewDir, meta, outFile) {
   const root = await realpath(previewDir);
@@ -4913,7 +4946,7 @@ function wholeNumber(raw, flag, fallback, min, max = Number.MAX_SAFE_INTEGER) {
   }
   return n;
 }
-var DEFAULT_DAYS = 15;
+var DEFAULT_DAYS = 14;
 var sessionFloor = (days) => days === void 0 ? LIMITS.sessionFloor : 0;
 var quote = (p2) => /^[\w./~-]+$/.test(p2) ? p2 : `"${p2.replace(/(["\\$`])/g, "\\$1")}"`;
 var COUNT_LABELS = {
@@ -4994,10 +5027,19 @@ async function prepareFrom(e, values) {
   }
   const empty = limitProblem({ window, session_count: sessions.length, bytes: { compressed: 0, uncompressed: 0 } });
   if (empty) throw new UserError(empty);
-  const { dir, meta } = await writePreview({ projectsDir, window, sessions, revefiDir: join7(root, ".revefi"), home: homedir3() });
+  const { dir, meta } = await writePreview({
+    projectsDir,
+    window,
+    sessions,
+    revefiDir: join7(root, ".revefi"),
+    home: homedir3(),
+    maxCompressedBytes: LIMITS.maxCompressedBytes
+  });
   await writeFile4(join7(dir, UPLOAD_TO), `${new URL(apiBase(e, values.api)).host}
 `, { mode: 384 });
-  return { dir, meta, sourceBytes: sessions.reduce((a, s3) => a + s3.bytes, 0), scope: all ? "all projects on this machine" : scopeRoot };
+  const sent = new Set(meta.sessions.map((s3) => s3.id));
+  const sourceBytes = sessions.filter((s3) => sent.has(s3.id)).reduce((a, s3) => a + s3.bytes, 0);
+  return { dir, meta, sourceBytes, scope: all ? "all projects on this machine" : scopeRoot };
 }
 function describePreview(e, p2, api) {
   const { meta } = p2;
@@ -5402,8 +5444,9 @@ Commands:
 ${Object.entries(COMMANDS).map(([name, c]) => `  ${name.padEnd(17)}${c.summary}`).join("\n")}
 
 Options for analyze, prepare and projects:
-  --days N               Days of history to analyze, 1-15 (default 15, or the latest 15
-                         sessions if those days have fewer; projects takes only this)
+  --days N               Days of history to analyze, 1-14 (default 14, or the latest 100
+                         sessions if those days have fewer; newest first, up to 200 MB
+                         compressed; projects takes only this)
   --all-projects         Every project on this machine, not just this repository
   --project DIR          Sessions started in DIR or below it, instead of this repository
   --exclude-session ID   Leave a session out (repeatable; a prefix of the id is enough)

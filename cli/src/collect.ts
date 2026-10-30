@@ -175,19 +175,28 @@ export async function collect(opts: CollectOptions): Promise<{ window: Window; s
 
 const byNewest = (a: Session, b: Session) => (a.day === b.day ? (a.id < b.id ? -1 : 1) : a.day > b.day ? -1 : 1);
 
+/** The most uncompressed history one upload may hold; the server enforces the same limit. */
+export const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
+
 /**
  * The sessions of the last `days` days or, when those are fewer than `floor`, the `floor` most
  * recent ones, with the window widened to their real span so the server analyzes all of them.
+ * The newest are kept up to `MAX_UPLOAD_BYTES` of transcript, and always at least one; the
+ * preview then trims to the compressed limit.
  */
 export function pick(sessions: Session[], today: string, days: number, floor: number): { window: Window; sessions: Session[] } {
   const window = windowEndingOn(today, days);
   const recent = sessions.filter((s) => s.day >= window.start && s.day <= today);
-  const latest = recent.length >= floor ? [] : sessions.filter((s) => s.day <= today).sort(byNewest).slice(0, floor);
-  const oldest = latest.at(-1)?.day;
-  if (oldest === undefined || oldest >= window.start) return { window, sessions: recent };
-  const keep = new Set(latest);
+  const chosen = recent.length >= floor ? recent : sessions.filter((s) => s.day <= today).sort(byNewest).slice(0, floor);
+  let total = 0;
+  const keep = new Set(
+    [...chosen].sort(byNewest).filter((s, i) => (total += s.bytes) <= MAX_UPLOAD_BYTES || i === 0),
+  );
+  const kept = sessions.filter((s) => keep.has(s));
+  const oldest = kept.reduce<string | undefined>((min, s) => (min === undefined || s.day < min ? s.day : min), undefined);
+  if (oldest === undefined || oldest >= window.start) return { window, sessions: kept };
   const span = Math.round((Date.parse(today) - Date.parse(oldest)) / 86_400_000) + 1;
-  return { window: windowEndingOn(today, span), sessions: sessions.filter((s) => keep.has(s)) };
+  return { window: windowEndingOn(today, span), sessions: kept };
 }
 
 /** Path inside the upload archive: `projects/<project>/...`, always with forward slashes. */

@@ -7,6 +7,7 @@ import {
   collect,
   defaultProjectsDir,
   encodeProjectDir,
+  MAX_UPLOAD_BYTES,
   pick,
   type Session,
   utcToday,
@@ -138,6 +139,17 @@ describe("pick", () => {
     expect(ids(r)).toEqual(["a", "b"]);
     expect(r.window).toEqual({ days: 12, start: "2026-09-20", end: "2026-10-01" });
     expect(ids(pick(all, "2026-10-01", 7, 10))).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("keeps the newest sessions that fit in the upload limit, and always the newest one", () => {
+    const big = (id: string, day: string): Session => ({ ...s(id, day), bytes: MAX_UPLOAD_BYTES / 2 });
+    const r = pick([big("a", "2026-10-01"), big("b", "2026-09-30"), big("c", "2026-09-29")], "2026-10-01", 7, 1);
+    expect(ids(r)).toEqual(["a", "b"]);
+    expect(r.window.days).toBe(7);
+    const widened = pick([big("a", "2026-10-01"), big("b", "2026-09-01"), big("c", "2026-08-01")], "2026-10-01", 7, 3);
+    expect(ids(widened)).toEqual(["a", "b"]);
+    expect(widened.window).toEqual({ days: 31, start: "2026-09-01", end: "2026-10-01" });
+    expect(ids(pick([{ ...s("huge", "2026-10-01"), bytes: MAX_UPLOAD_BYTES * 2 }, s("x", "2026-09-30")], "2026-10-01", 7, 1))).toEqual(["huge"]);
   });
 
   it("keeps the window when there is nothing older to add", () => {
