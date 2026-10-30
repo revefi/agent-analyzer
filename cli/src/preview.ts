@@ -2,7 +2,6 @@ import { createReadStream, createWriteStream } from "node:fs";
 import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import { Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
 import { archivePath, type Session, type Window, windowEndingOn } from "./collect.js";
@@ -177,19 +176,17 @@ async function removeSession(dir: string, s: Session, home?: string): Promise<vo
 /** Gzipped size of the files, at the level the upload archive uses: a close estimate of their share of it. */
 async function gzippedSize(dir: string, paths: string[]): Promise<number> {
   let size = 0;
-  const count = new Writable({
-    write(chunk: Buffer, _enc, done) {
-      size += chunk.length;
-      done();
-    },
-  });
-  for (const p of paths) await pipeline(createReadStream(join(dir, ...p.split("/"))), createGzip(), count, { end: false });
+  for (const p of paths) {
+    for await (const chunk of createReadStream(join(dir, ...p.split("/"))).pipe(createGzip())) size += (chunk as Buffer).length;
+    // The archive also carries a tar header per file; counting a whole one keeps the estimate above it.
+    size += 512;
+  }
   return size;
 }
 
 export async function writePreview(
   opts: WritePreviewOptions,
-): Promise<{ dir: string; meta: PreviewMeta }> {
+): Promise<{ dir: string; meta: PreviewMeta; sessions: Session[] }> {
   await ensureIgnored(opts.revefiDir);
   const base = join(opts.revefiDir, "upload-preview");
   await mkdirNoSymlink(base);
@@ -203,7 +200,7 @@ export async function writePreview(
       bytes: 0,
     };
     const candidates: FileErrorCandidate[] = [];
-    const kept: { at: number; ps: PreviewSession; found: FileErrorCandidate[] }[] = [];
+    const kept: { at: number; s: Session; ps: PreviewSession; found: FileErrorCandidate[] }[] = [];
     const budget = opts.maxCompressedBytes ?? Infinity;
     let compressed = 0;
     let trimmed = false;
@@ -228,9 +225,10 @@ export async function writePreview(
           continue;
         }
       }
-      kept.push({ at, ps, found });
+      kept.push({ at, s, ps, found });
     }
-    for (const { ps, found } of kept.sort((a, b) => a.at - b.at)) {
+    kept.sort((a, b) => a.at - b.at);
+    for (const { ps, found } of kept) {
       meta.sessions.push(ps);
       add(meta.counts, ps.counts);
       meta.bytes += ps.bytes;
@@ -257,7 +255,7 @@ export async function writePreview(
     await writeFile(join(dir, REPORT_FILE), renderReport(meta), {
       mode: 0o600,
     });
-    return { dir, meta };
+    return { dir, meta, sessions: kept.map((k) => k.s) };
   } catch (err) {
     await rm(dir, { recursive: true, force: true });
     throw err;

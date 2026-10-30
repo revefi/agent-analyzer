@@ -183,6 +183,8 @@ describe("writePreview", () => {
 
     const trimmed = await write(found, twoSize * 1.05);
     expect(trimmed.meta.sessions.map((x) => x.id).sort()).toEqual(["b0", "b1"]);
+    expect(trimmed.sessions.map((x) => x.id).sort()).toEqual(["b0", "b1"]);
+    expect(trimmed.meta.counts).toEqual(two.meta.counts);
     expect(trimmed.meta.window).toEqual({ days: 4, start: "2026-09-28", end: "2026-10-01" });
     expect(readdirSync(join(trimmed.dir, "projects", ALIAS)).sort()).toEqual(["b0.jsonl", "b1.jsonl"]);
     expect((await pack(trimmed.dir, trimmed.meta, join(tmp, "budget", "t.tgz"))).compressed).toBeLessThanOrEqual(twoSize * 1.05);

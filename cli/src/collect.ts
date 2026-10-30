@@ -194,7 +194,7 @@ export function pick(sessions: Session[], today: string, days: number, floor: nu
   );
   const kept = sessions.filter((s) => keep.has(s));
   const oldest = kept.reduce<string | undefined>((min, s) => (min === undefined || s.day < min ? s.day : min), undefined);
-  if (oldest === undefined || oldest >= window.start) return { window, sessions: kept };
+  if (oldest === undefined || (oldest >= window.start && kept.length === chosen.length)) return { window, sessions: kept };
   const span = Math.round((Date.parse(today) - Date.parse(oldest)) / 86_400_000) + 1;
   return { window: windowEndingOn(today, span), sessions: kept };
 }

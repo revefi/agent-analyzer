@@ -145,7 +145,7 @@ describe("pick", () => {
     const big = (id: string, day: string): Session => ({ ...s(id, day), bytes: MAX_UPLOAD_BYTES / 2 });
     const r = pick([big("a", "2026-10-01"), big("b", "2026-09-30"), big("c", "2026-09-29")], "2026-10-01", 7, 1);
     expect(ids(r)).toEqual(["a", "b"]);
-    expect(r.window.days).toBe(7);
+    expect(r.window).toEqual({ days: 2, start: "2026-09-30", end: "2026-10-01" });
     const widened = pick([big("a", "2026-10-01"), big("b", "2026-09-01"), big("c", "2026-08-01")], "2026-10-01", 7, 3);
     expect(ids(widened)).toEqual(["a", "b"]);
     expect(widened.window).toEqual({ days: 31, start: "2026-09-01", end: "2026-10-01" });

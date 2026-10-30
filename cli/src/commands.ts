@@ -235,6 +235,8 @@ interface Prepared {
   dir: string;
   meta: PreviewMeta;
   sourceBytes: number;
+  /** Found but not in the preview: past the compressed upload limit, or deleted meanwhile. */
+  leftOut: number;
   scope: string;
 }
 
@@ -287,7 +289,7 @@ async function prepareFrom(
   }
   const empty = limitProblem({ window, session_count: sessions.length, bytes: { compressed: 0, uncompressed: 0 } });
   if (empty) throw new UserError(empty);
-  const { dir, meta } = await writePreview({
+  const { dir, meta, sessions: sent } = await writePreview({
     projectsDir,
     window,
     sessions,
@@ -296,17 +298,22 @@ async function prepareFrom(
     maxCompressedBytes: LIMITS.maxCompressedBytes,
   });
   await writeFile(join(dir, UPLOAD_TO), `${new URL(apiBase(e, values.api)).host}\n`, { mode: 0o600 });
-  const sent = new Set(meta.sessions.map((s) => s.id));
-  const sourceBytes = sessions.filter((s) => sent.has(s.id)).reduce((a, s) => a + s.bytes, 0);
-  return { dir, meta, sourceBytes, scope: all ? "all projects on this machine" : scopeRoot };
+  return {
+    dir,
+    meta,
+    sourceBytes: sent.reduce((a, s) => a + s.bytes, 0),
+    leftOut: sessions.length - sent.length,
+    scope: all ? "all projects on this machine" : scopeRoot,
+  };
 }
 
-function describePreview(e: Env, p: { dir: string; meta: PreviewMeta; sourceBytes?: number; scope?: string }, api: string): void {
+function describePreview(e: Env, p: { dir: string; meta: PreviewMeta; sourceBytes?: number; leftOut?: number; scope?: string }, api: string): void {
   const { meta } = p;
   const size = p.sourceBytes === undefined ? humanSize(meta.bytes) : `${humanSize(p.sourceBytes)} → ${humanSize(meta.bytes)} after redaction`;
   const projects = new Set(meta.sessions.map((s) => s.project)).size;
   if (p.scope) e.io.out(`Scope: ${p.scope}`);
   e.io.out(`${meta.sessions.length} sessions in ${projects} project${projects === 1 ? "" : "s"}, ${meta.window.start} to ${meta.window.end} · ${size}`);
+  if (p.leftOut) e.io.out(`${p.leftOut} older session${p.leftOut === 1 ? "" : "s"} left out to keep the upload under ${humanSize(LIMITS.maxCompressedBytes)}.`);
   e.io.out(redactionLine(meta));
   e.io.out(`Preview: ${relative(e.cwd, p.dir) || "."}  (${REPORT_FILE} there lists exactly what is sent)`);
   e.io.out("");
@@ -568,6 +575,7 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
             scope: p.scope,
             window: p.meta.window,
             sessions: p.meta.sessions.length,
+            left_out: p.leftOut,
             session_list: p.meta.sessions.map((s) => ({ id: s.id, project: s.project, day: s.day, bytes: s.bytes })),
             bytes_before: p.sourceBytes,
             bytes_after: p.meta.bytes,

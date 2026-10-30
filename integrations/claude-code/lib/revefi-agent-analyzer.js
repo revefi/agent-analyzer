@@ -687,7 +687,7 @@ function pick(sessions, today, days, floor) {
   );
   const kept = sessions.filter((s3) => keep.has(s3));
   const oldest = kept.reduce((min, s3) => min === void 0 || s3.day < min ? s3.day : min, void 0);
-  if (oldest === void 0 || oldest >= window.start) return { window, sessions: kept };
+  if (oldest === void 0 || oldest >= window.start && kept.length === chosen.length) return { window, sessions: kept };
   const span = Math.round((Date.parse(today) - Date.parse(oldest)) / 864e5) + 1;
   return { window: windowEndingOn(today, span), sessions: kept };
 }
@@ -3673,7 +3673,6 @@ import { createReadStream as createReadStream2, createWriteStream } from "node:f
 import { lstat, mkdir as mkdir2, mkdtemp, readFile as readFile2, rename as rename2, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
 import { dirname, join as join4 } from "node:path";
 import { createInterface as createInterface2 } from "node:readline";
-import { Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
 
@@ -4504,13 +4503,10 @@ async function removeSession(dir, s3, home) {
 }
 async function gzippedSize(dir, paths) {
   let size = 0;
-  const count = new Writable({
-    write(chunk, _enc, done) {
-      size += chunk.length;
-      done();
-    }
-  });
-  for (const p2 of paths) await pipeline(createReadStream2(join4(dir, ...p2.split("/"))), createGzip(), count, { end: false });
+  for (const p2 of paths) {
+    for await (const chunk of createReadStream2(join4(dir, ...p2.split("/"))).pipe(createGzip())) size += chunk.length;
+    size += 512;
+  }
   return size;
 }
 async function writePreview(opts) {
@@ -4551,9 +4547,10 @@ async function writePreview(opts) {
           continue;
         }
       }
-      kept.push({ at: at2, ps: ps2, found });
+      kept.push({ at: at2, s: s3, ps: ps2, found });
     }
-    for (const { ps: ps2, found } of kept.sort((a, b2) => a.at - b2.at)) {
+    kept.sort((a, b2) => a.at - b2.at);
+    for (const { ps: ps2, found } of kept) {
       meta.sessions.push(ps2);
       add(meta.counts, ps2.counts);
       meta.bytes += ps2.bytes;
@@ -4582,7 +4579,7 @@ async function writePreview(opts) {
     await writeFile2(join4(dir, REPORT_FILE), renderReport(meta), {
       mode: 384
     });
-    return { dir, meta };
+    return { dir, meta, sessions: kept.map((k2) => k2.s) };
   } catch (err) {
     await rm2(dir, { recursive: true, force: true });
     throw err;
@@ -5027,7 +5024,7 @@ async function prepareFrom(e, values) {
   }
   const empty = limitProblem({ window, session_count: sessions.length, bytes: { compressed: 0, uncompressed: 0 } });
   if (empty) throw new UserError(empty);
-  const { dir, meta } = await writePreview({
+  const { dir, meta, sessions: sent } = await writePreview({
     projectsDir,
     window,
     sessions,
@@ -5037,9 +5034,13 @@ async function prepareFrom(e, values) {
   });
   await writeFile4(join7(dir, UPLOAD_TO), `${new URL(apiBase(e, values.api)).host}
 `, { mode: 384 });
-  const sent = new Set(meta.sessions.map((s3) => s3.id));
-  const sourceBytes = sessions.filter((s3) => sent.has(s3.id)).reduce((a, s3) => a + s3.bytes, 0);
-  return { dir, meta, sourceBytes, scope: all ? "all projects on this machine" : scopeRoot };
+  return {
+    dir,
+    meta,
+    sourceBytes: sent.reduce((a, s3) => a + s3.bytes, 0),
+    leftOut: sessions.length - sent.length,
+    scope: all ? "all projects on this machine" : scopeRoot
+  };
 }
 function describePreview(e, p2, api) {
   const { meta } = p2;
@@ -5047,6 +5048,7 @@ function describePreview(e, p2, api) {
   const projects = new Set(meta.sessions.map((s3) => s3.project)).size;
   if (p2.scope) e.io.out(`Scope: ${p2.scope}`);
   e.io.out(`${meta.sessions.length} sessions in ${projects} project${projects === 1 ? "" : "s"}, ${meta.window.start} to ${meta.window.end} \xB7 ${size}`);
+  if (p2.leftOut) e.io.out(`${p2.leftOut} older session${p2.leftOut === 1 ? "" : "s"} left out to keep the upload under ${humanSize(LIMITS.maxCompressedBytes)}.`);
   e.io.out(redactionLine(meta));
   e.io.out(`Preview: ${relative2(e.cwd, p2.dir) || "."}  (${REPORT_FILE} there lists exactly what is sent)`);
   e.io.out("");
@@ -5279,6 +5281,7 @@ var COMMANDS = {
             scope: p2.scope,
             window: p2.meta.window,
             sessions: p2.meta.sessions.length,
+            left_out: p2.leftOut,
             session_list: p2.meta.sessions.map((s3) => ({ id: s3.id, project: s3.project, day: s3.day, bytes: s3.bytes })),
             bytes_before: p2.sourceBytes,
             bytes_after: p2.meta.bytes,
@@ -5435,7 +5438,7 @@ async function askYesNo(question) {
 }
 
 // cli/src/main.ts
-var VERSION = true ? "0.5.2" : "0.0.0-dev";
+var VERSION = true ? "0.6.0" : "0.0.0-dev";
 var USAGE = `Usage: revefi-agent-analyzer <command> [options]
 
 Find repeated work and wasted spend in your Claude Code sessions.

@@ -129,7 +129,7 @@ describe("prepare then upload (the plugin's path)", () => {
     const prep = await run(["prepare", "--json"]);
     expect(prep.code).toBe(0);
     const p = JSON.parse(prep.out) as { preview_dir: string; sessions: number; upload_to: string };
-    expect(p).toMatchObject({ sessions: 1, upload_to: "api.test", session_list: [{ id: "s1", day: utcToday() }] });
+    expect(p).toMatchObject({ sessions: 1, left_out: 0, upload_to: "api.test", session_list: [{ id: "s1", day: utcToday() }] });
 
     const up = await run(["upload", p.preview_dir, "--yes", "--json"], { env: { CLAUDECODE: "1" } });
     expect(up.code).toBe(0);
