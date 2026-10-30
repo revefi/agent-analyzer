@@ -86,6 +86,7 @@ async function run(
   const srv = opts.srv ?? server();
   const out: string[] = [];
   const err: string[] = [];
+  const opened: string[] = [];
   const e: Env = {
     io: { out: (s) => out.push(s), err: (s) => err.push(s) },
     version: "0.1.0",
@@ -96,9 +97,10 @@ async function run(
     fetch: srv.fetch,
     sleep: async () => undefined,
     configDir: join(tmp, "config"),
+    openUrl: (url) => opened.push(url),
   };
   const code = await main(argv, e);
-  return { code, out: out.join("\n"), err: err.join("\n"), seen: srv.seen };
+  return { code, out: out.join("\n"), err: err.join("\n"), seen: srv.seen, opened };
 }
 
 const calls = (seen: Seen[]) => seen.map((s) => `${s.method} ${new URL(s.url).pathname}`);
@@ -368,6 +370,9 @@ describe("sign-in", () => {
       verification_uri_complete: "https://auth.test/activate?user_code=ABCD-EFGH",
     });
     expect(start.out).not.toContain("dev-1");
+    expect(start.opened).toEqual(["https://auth.test/activate?user_code=ABCD-EFGH"]);
+    rmSync(join(tmp, "config"), { recursive: true, force: true });
+    expect((await run(["login", "--start", "--json", "--no-browser"], { srv: fakeFetch(AUTH0) })).opened).toEqual([]);
 
     const done = await run(["login", "--wait", "--json"], { srv: fakeFetch(AUTH0) });
     expect(done.code).toBe(0);

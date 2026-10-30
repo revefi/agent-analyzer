@@ -242,7 +242,7 @@ var Auth = class {
   }
   async expired() {
     await rm(this.file(PENDING), { force: true });
-    return new SignInError(`The sign-in code expired. Run \`${this.login}\` again.`);
+    return new SignInError(`The sign-in code expired. Run \`${this.login}\` again.`, "signed_out");
   }
   /** Waits for the user to approve the pending login, then stores the refresh token. */
   async finishLogin(opts = {}) {
@@ -4867,7 +4867,7 @@ function auth(e, api) {
   return new Auth({ base, dir: serverDir(e, base), fetch: e.fetch, sleep: e.sleep, env: e.env, loginCommand: loginCommand(api) });
 }
 function openInBrowser(url) {
-  if (process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return;
+  if (process.env.SSH_CONNECTION || process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return;
   const [cmd, args] = process.platform === "darwin" ? ["open", [url]] : process.platform === "win32" ? ["rundll32", ["url.dll,FileProtocolHandler", url]] : ["xdg-open", [url]];
   const child = spawn(cmd, args, { stdio: "ignore", detached: true, windowsHide: true });
   child.on("error", () => void 0);
@@ -5139,6 +5139,7 @@ var COMMANDS = {
       const a = auth(e, values.api);
       if (values.start) {
         const pending = await a.startLogin();
+        if (!values["no-browser"]) (e.openUrl ?? openInBrowser)(pending.verification_uri_complete);
         if (values.json) {
           e.io.out(
             JSON.stringify({
@@ -5392,7 +5393,7 @@ async function askYesNo(question) {
 }
 
 // cli/src/main.ts
-var VERSION = true ? "0.5.1" : "0.0.0-dev";
+var VERSION = true ? "0.5.2" : "0.0.0-dev";
 var USAGE = `Usage: revefi-agent-analyzer <command> [options]
 
 Find repeated work and wasted spend in your Claude Code sessions.
@@ -5408,7 +5409,7 @@ Options for analyze, prepare and projects:
   --exclude-session ID   Leave a session out (repeatable; a prefix of the id is enough)
 
 Options for login:
-  --start                Print the sign-in link and code, then exit (--json for a script)
+  --start                Print the sign-in link and code, open it, then exit (--json for a script)
   --wait                 Wait for a started sign-in to be approved
   --no-browser           Don't open the browser; just print the link
 

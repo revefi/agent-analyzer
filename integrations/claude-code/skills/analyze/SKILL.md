@@ -24,6 +24,9 @@ Rules that hold throughout:
   never one containing `'`), `--days N` (a whole number from 1 to 15), and
   `--exclude-session 'ID'` (repeatable). No other flags.
 - Single-quote every path, id and URL you put in a command.
+- Every link you show the user (the sign-in link, the report link) goes on a line of its own, as
+  the bare URL with nothing around it: no backticks, bold, brackets or punctuation after it, so
+  the terminal makes it clickable.
 - Don't read the preview files into the conversation. They are large and may hold sensitive
   text. The user can open them; you report the summary.
 - With `--json`, the CLI prints one JSON object on stdout. If it has an `error` key whose `kind`
@@ -43,20 +46,25 @@ If the JSON has no `error`, carry on. If the error kind is `sign_in`, start a si
 revefi-agent-analyzer login --start --json
 ```
 
-Show the user `verification_uri_complete` and `user_code`, and tell them to open the link,
-check that it shows the same code, and continue with Google or an emailed code. Someone
-signing in for the first time gets an account then; there is no separate sign-up. Then wait,
-with a Bash timeout of 600000 ms:
+The command also tries to open that page in the user's browser. The user can't see command output,
+so end your turn here with a message that has `verification_uri_complete` as a link (see the rule
+above) and `user_code`. Say the page may already be open; otherwise they open the link, check that
+it shows the same code, and continue with Google or an emailed code; and that they reply here once
+they've signed in. Someone signing in for the first time gets an account then; there is no separate
+sign-up.
+
+When the user replies, run this, with a Bash timeout of 600000 ms:
 
 ```bash
 revefi-agent-analyzer login --wait --json --timeout 420
 ```
 
-It prints the `email` once they approve. If the error kind is `sign_in_pending`, they haven't
-approved yet: run the same command once more. Never run `login --start` again while waiting; a
-new code would replace the one they are approving. If it is still pending after that, or fails
-any other way, show `error.message` and tell the user to run `revefi-agent-analyzer login` in a
-terminal, then stop.
+It prints the `email` once they approve; then carry on with what they asked for. If the error kind
+is `sign_in_pending`, they haven't approved yet: say so, show the link again and end your turn, then
+run the same command on their next reply. If it is `sign_in`, the code expired: start again with
+`login --start`, once. Never run `login --start` while a code is still waiting; a new code would
+replace the one they are approving. If it fails any other way, show `error.message` and tell the
+user to run `revefi-agent-analyzer login` in a terminal, then stop.
 
 ## 1. Choose what to scan
 
@@ -147,8 +155,9 @@ with the options "Upload", "Don't upload" and "Leave some sessions out first".
 revefi-agent-analyzer upload '<preview_dir>' --yes --json --no-wait
 ```
 
-This returns as soon as the analysis starts, with `run_id`, `report_url` and `phase`. Then
-follow it, giving every call a Bash timeout of 600000 ms:
+This returns as soon as the analysis starts, with `run_id`, `report_url` and `phase`. Show the
+user `report_url` as a link right away, and say the report fills in there as the analysis runs.
+Then follow it, giving every call a Bash timeout of 600000 ms:
 
 ```bash
 revefi-agent-analyzer status '<run_id>' --wait --json --timeout 480
@@ -157,17 +166,18 @@ revefi-agent-analyzer status '<run_id>' --wait --json --timeout 480
 Decide on the `phase` in the JSON, not the exit code:
 
 - `done`: go to step 5.
-- `failed` or `deferred`: show the message the CLI printed and stop.
+- `failed` or `deferred`: show the message the CLI printed and the `report_url` link, and stop.
 - anything else: the analysis is still running (it usually takes three to six minutes). Run the
   same command again, at most two more times. If it still isn't done, give the user
-  `report_url` and the command `revefi-agent-analyzer status <run_id> --wait`, and stop.
+  `report_url` and the command `revefi-agent-analyzer status '<run_id>' --wait`, and stop.
 
 ## 5. Report
 
-Show the report link (`report_url`), then each entry of `top` as a numbered line: its `title`
-and `≈ $<cluster.window_usd>` spent on it in this window. Keep it short; the report page has the
-detail. If `cost_capped` is true, say the analyzer hit today's analysis limit partway
-through, so parts of the report may be missing, and a run tomorrow gives the full report.
+Always start with the report link (`report_url`), even when `top` is empty. Then show each entry of
+`top` as a numbered line: its `title` and `≈ $<cluster.window_usd>` spent on it in this window. Keep
+it short; the report page has the detail. If `cost_capped` is true, say the analyzer hit today's
+analysis limit partway through, so parts of the report may be missing, and a run tomorrow gives the
+full report.
 
 ## 6. Offer the fixes
 
