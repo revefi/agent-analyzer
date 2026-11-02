@@ -17,16 +17,24 @@ flowchart LR
 
 ## Install
 
+**Claude Code in a terminal or an IDE:**
+
 ```text
 /plugin marketplace add revefi/agent-analyzer
 /plugin install revefi@revefi
 ```
 
+**Claude desktop app:**
+
+1. Open **Settings** → **Plugins**, click **Add**, and choose **Add marketplace**.
+2. Enter `revefi/agent-analyzer` as the URL and click **Sync**.
+3. On the **Discover** tab, find **Revefi** and click **Add to this computer**.
+
 Then run `/revefi:analyze` in any repository. It asks which sessions to scan (this directory,
 this project, one you name, or all) and covers the last 14 days or your 100 latest sessions,
 whichever is more, keeping the newest that fit in 200 MB compressed. The first time, it has you
 sign in with Google or an emailed code. Needs Node.js 22.12 or newer, and Claude Code in a
-terminal or an IDE.
+terminal, an IDE or the Claude desktop app.
 
 ## Redaction
 
