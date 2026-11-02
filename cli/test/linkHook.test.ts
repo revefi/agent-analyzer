@@ -20,11 +20,10 @@ const message = (input: HookInput, c = ctx) => {
 };
 
 describe("hookCommand", () => {
-  it("knows the plugin's own commands, with an --api override", () => {
+  it("knows the plugin's own commands", () => {
     expect(hookCommand("revefi-agent-analyzer login --start --json")).toEqual({ kind: "start" });
     expect(hookCommand("revefi-agent-analyzer upload '/p' --yes --json --no-wait")).toEqual({ kind: "upload" });
-    expect(hookCommand("revefi-agent-analyzer status 'r1' --wait --json --api 'https://x.test'")).toEqual({ kind: "status", api: "https://x.test" });
-    expect(hookCommand("revefi-agent-analyzer status r1 --api=https://x.test")).toEqual({ kind: "status", api: "https://x.test" });
+    expect(hookCommand("revefi-agent-analyzer status 'r1' --wait --json")).toEqual({ kind: "status" });
   });
 
   it("refuses anything that could run or feed another program, and other commands", () => {
@@ -39,6 +38,8 @@ describe("hookCommand", () => {
       "FOO=1 revefi-agent-analyzer upload x",
       "revefi-agent-analyzer whoami --json",
       "revefi-agent-analyzer login --wait --json",
+      "revefi-agent-analyzer status 'r1' --json --api 'https://evil.test'",
+      "revefi-agent-analyzer upload x --api=https://evil.test",
       "npm test",
     ]) {
       expect(hookCommand(c), c).toBeNull();
@@ -92,13 +93,13 @@ describe("linkMessage", () => {
 });
 
 describe("hook command", () => {
-  const run = async (stdin: string, configDir = join(tmpdir(), "no-such-config"), env: NodeJS.ProcessEnv = {}) => {
+  const run = async (stdin: string, configDir = join(tmpdir(), "no-such-config")) => {
     const out: string[] = [];
     const code = await main(["hook"], {
       io: { out: (s) => out.push(s), err: () => undefined },
       version: "0.1.0",
       cwd: "/",
-      env,
+      env: {},
       isTTY: false,
       ask: async () => false,
       configDir,
@@ -128,14 +129,9 @@ describe("hook command", () => {
     }
   });
 
-  it("speaks only for the server set in its own environment, never one named on the command line", async () => {
+  it("ignores a call that names another server", async () => {
     const evil = ok("revefi-agent-analyzer upload x --json --api https://evil.test", { report_url: "https://evil.test/r/abc" });
     expect(await run(JSON.stringify(evil))).toEqual({ code: 0, out: "" });
-    const dev = "https://dev-analyzer.revefi.com";
-    const devUpload = ok(`revefi-agent-analyzer upload x --json --api ${dev}`, { report_url: `${dev}/r/abc` });
-    expect(await run(JSON.stringify(devUpload))).toEqual({ code: 0, out: "" });
-    const shown = await run(JSON.stringify(devUpload), undefined, { REVEFI_ANALYZER_API: dev });
-    expect(JSON.parse(shown.out)).toEqual({ systemMessage: `Your Revefi report (it fills in as the analysis runs):\n${dev}/r/abc` });
   });
 
   it("isn't listed in the help", () => {

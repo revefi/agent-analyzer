@@ -10,6 +10,13 @@ if (read("integrations/claude-code/.claude-plugin/plugin.json").version !== vers
   throw new Error(`plugin.json and package.json versions differ; bump them together to ${version}.`);
 }
 
+// optimizer.revefi.com unless a dev build names another server; the CLI has no runtime override.
+const api = process.env.ANALYZER_BUILD_API ?? "https://optimizer.revefi.com";
+if (!/^https:\/\/[a-z0-9.-]+(:\d+)?$/i.test(api) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(api)) {
+  throw new Error(`ANALYZER_BUILD_API must be an https:// origin, got ${api}.`);
+}
+if (api !== "https://optimizer.revefi.com") console.warn(`Dev build: talks to ${api}. Don't commit this bundle.`);
+
 await build({
   absWorkingDir: root,
   entryPoints: ["cli/src/bin.ts"],
@@ -19,7 +26,7 @@ await build({
   target: "node22",
   format: "esm",
   banner: { js: "#!/usr/bin/env node" },
-  define: { __VERSION__: JSON.stringify(version) },
+  define: { __VERSION__: JSON.stringify(version), __API__: JSON.stringify(api) },
   legalComments: "inline",
 });
 

@@ -81,7 +81,7 @@ function serverRoutes(finalPhase = "done"): Parameters<typeof fakeFetch>[0] {
 
 async function run(
   argv: string[],
-  opts: { tty?: boolean; answer?: boolean; srv?: ReturnType<typeof server>; env?: NodeJS.ProcessEnv; cwd?: string } = {},
+  opts: { tty?: boolean; answer?: boolean; srv?: ReturnType<typeof server>; env?: NodeJS.ProcessEnv; cwd?: string; api?: string } = {},
 ) {
   const srv = opts.srv ?? server();
   const out: string[] = [];
@@ -91,7 +91,8 @@ async function run(
     io: { out: (s) => out.push(s), err: (s) => err.push(s) },
     version: "0.1.0",
     cwd: opts.cwd ?? repo,
-    env: { CLAUDE_CONFIG_DIR: claude, REVEFI_ANALYZER_API: "https://api.test", ...opts.env },
+    env: { CLAUDE_CONFIG_DIR: claude, ...opts.env },
+    api: opts.api ?? "https://api.test",
     isTTY: opts.tty ?? false,
     ask: async () => opts.answer ?? false,
     fetch: srv.fetch,
@@ -286,16 +287,22 @@ describe("upload safety", () => {
 
   it("won't send a preview to a different server than the one it was shown for", async () => {
     const { preview_dir } = await prepared();
-    const r = await run(["upload", preview_dir, "--yes", "--api", "https://other.test"]);
+    const r = await run(["upload", preview_dir, "--yes"], { api: "https://other.test" });
     expect(r.code).toBe(1);
     expect(r.err).toContain("This preview was prepared for api.test, not other.test.");
     expect(r.seen).toEqual([]);
   });
 
   it("refuses plain http to anything but this machine", async () => {
-    const r = await run(["prepare", "--api", "http://analyzer.example"]);
+    const r = await run(["prepare"], { api: "http://analyzer.example" });
     expect(r.code).toBe(2);
     expect(r.err).toContain("The server must use https://");
+  });
+
+  it("talks only to its build's server: there is no --api", async () => {
+    const r = await run(["prepare", "--api", "https://other.test"]);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("--api");
   });
 
   it("keeps the run id visible when something fails after the run started", async () => {
@@ -391,7 +398,8 @@ describe("sign-in", () => {
       io: { out: (s) => out.push(s), err: (s) => err.push(s) },
       version: "0.1.0",
       cwd: repo,
-      env: { REVEFI_ANALYZER_API: "https://api.test" },
+      env: {},
+      api: "https://api.test",
       isTTY: true,
       ask: async () => false,
       fetch: srv.fetch,
@@ -413,7 +421,8 @@ describe("sign-in", () => {
       io: { out: () => undefined, err: (s) => err.push(s) },
       version: "0.1.0",
       cwd: repo,
-      env: { CLAUDE_CONFIG_DIR: claude, REVEFI_ANALYZER_API: "https://api.test" },
+      env: { CLAUDE_CONFIG_DIR: claude },
+      api: "https://api.test",
       isTTY: true,
       ask: async () => true,
       fetch: srv.fetch,

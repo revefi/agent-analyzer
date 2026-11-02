@@ -41,7 +41,6 @@ Other options:
   --no-wait              upload: return as soon as the analysis has started
   --timeout SECONDS      How long to wait for the report (analyze 1800, upload and status 480),
                          or for login to be approved (default: until the code expires)
-  --api URL              Analyzer server (default REVEFI_ANALYZER_API, else optimizer.revefi.com)
   -h, --help             Show this help
   -v, --version          Show the version
 
@@ -49,8 +48,8 @@ A preview is a folder under .revefi/upload-preview/ holding exactly the redacted
 be sent. It is removed once uploaded.
 
 Exit codes: 0 done, 1 failed or refused, 2 bad usage, 3 the analysis is still running.
-Environment: CLAUDE_CONFIG_DIR (where Claude Code keeps sessions), REVEFI_ANALYZER_API,
-REVEFI_DEBUG=1 (show stack traces).`;
+Environment: CLAUDE_CONFIG_DIR (where Claude Code keeps sessions), REVEFI_DEBUG=1 (show stack
+traces).`;
 
 const consoleIo: Io = { out: console.log, err: console.error };
 

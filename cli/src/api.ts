@@ -4,7 +4,9 @@ import { SignInError } from "./auth.js";
 import { unreachable } from "./net.js";
 import type { Manifest } from "./pack.js";
 
-export const DEFAULT_API = "https://optimizer.revefi.com";
+declare const __API__: string;
+/** The one server this build talks to: optimizer.revefi.com, or a dev server baked in at build time. */
+export const DEFAULT_API = typeof __API__ === "string" ? __API__ : "https://optimizer.revefi.com";
 export const ISSUES_URL = "https://github.com/revefi/agent-analyzer/issues";
 
 export type Phase = "uploading" | "analyzing" | "finishing" | "done" | "failed" | "deferred";

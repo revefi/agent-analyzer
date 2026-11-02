@@ -65,6 +65,14 @@ anyone with the link, or to delete everything you've uploaded.
 pnpm install && pnpm test && pnpm build
 ```
 
+The CLI talks only to optimizer.revefi.com. To test against another server, build a development
+copy with that server baked in, and load it with `claude --plugin-dir integrations/claude-code`.
+Don't commit that bundle; run `pnpm build` again before you do.
+
+```bash
+ANALYZER_BUILD_API=https://dev-analyzer.revefi.com pnpm build
+```
+
 ## Security and license
 
 Report vulnerabilities as described in [SECURITY.md](SECURITY.md). Licensed under the

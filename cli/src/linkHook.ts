@@ -10,7 +10,7 @@ export interface HookInput {
   error?: unknown;
 }
 
-export type HookCommand = { kind: "start" | "upload" | "status"; api?: string };
+export type HookCommand = { kind: "start" | "upload" | "status" };
 
 // One plain invocation: anything that could run a second program, or feed it, is refused.
 const SHELL_SYNTAX = /[;&|`$<>(){}\\\n\r]/;
@@ -26,11 +26,9 @@ export function hookCommand(command: unknown): HookCommand | null {
   if (words[0] !== "revefi-agent-analyzer") return null;
   const sub = words[1];
   const kind = sub === "login" && words.includes("--start") ? "start" : sub === "upload" ? "upload" : sub === "status" ? "status" : null;
-  if (!kind) return null;
-  const at = words.findIndex((w) => w === "--api" || w.startsWith("--api="));
-  const flag = at < 0 ? undefined : words[at];
-  const raw = flag === undefined ? undefined : flag === "--api" ? words[at + 1] : flag.slice("--api=".length);
-  return { kind, api: raw?.replace(/^['"]|['"]$/g, "") };
+  // The CLI has no --api any more; a call naming one isn't this CLI talking to its server.
+  if (!kind || words.some((w) => w.startsWith("--api"))) return null;
+  return { kind };
 }
 
 /**

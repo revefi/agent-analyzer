@@ -369,7 +369,7 @@ var Auth = class {
 };
 
 // cli/src/api.ts
-var DEFAULT_API = "https://optimizer.revefi.com";
+var DEFAULT_API = true ? "https://optimizer.revefi.com" : "https://optimizer.revefi.com";
 var ISSUES_URL = "https://github.com/revefi/agent-analyzer/issues";
 var FINAL_PHASES = ["done", "failed", "deferred"];
 var ApiError = class extends Error {
@@ -4854,11 +4854,8 @@ function hookCommand(command) {
   if (words[0] !== "revefi-agent-analyzer") return null;
   const sub = words[1];
   const kind = sub === "login" && words.includes("--start") ? "start" : sub === "upload" ? "upload" : sub === "status" ? "status" : null;
-  if (!kind) return null;
-  const at2 = words.findIndex((w2) => w2 === "--api" || w2.startsWith("--api="));
-  const flag = at2 < 0 ? void 0 : words[at2];
-  const raw = flag === void 0 ? void 0 : flag === "--api" ? words[at2 + 1] : flag.slice("--api=".length);
-  return { kind, api: raw?.replace(/^['"]|['"]$/g, "") };
+  if (!kind || words.some((w2) => w2.startsWith("--api"))) return null;
+  return { kind };
 }
 function cliJson(input) {
   const stdout = typeof input.tool_response?.stdout === "string" ? input.tool_response.stdout : void 0;
@@ -4910,7 +4907,6 @@ var SCOPE_OPTIONS = {
   project: { type: "string" },
   "exclude-session": { type: "string", multiple: true }
 };
-var API_OPTION = { api: { type: "string" } };
 function parse(args, options, positionals = 0) {
   let parsed;
   try {
@@ -4932,8 +4928,8 @@ function projectRoot(cwd) {
     return cwd;
   }
 }
-function apiBase(e, api) {
-  const raw = api ?? e.env.REVEFI_ANALYZER_API ?? DEFAULT_API;
+function apiBase(e) {
+  const raw = e.api ?? DEFAULT_API;
   let url;
   try {
     url = new URL(raw);
@@ -4951,10 +4947,10 @@ function serverDir(e, base) {
   const host = new URL(base).host;
   return host === new URL(DEFAULT_API).host ? root : join7(root, "servers", host.replace(/[^\w.-]/g, "_"));
 }
-var loginCommand = (api) => `revefi-agent-analyzer login${api ? ` --api ${quote(api)}` : ""}`;
-function auth(e, api) {
-  const base = apiBase(e, api);
-  return new Auth({ base, dir: serverDir(e, base), fetch: e.fetch, sleep: e.sleep, env: e.env, loginCommand: loginCommand(api) });
+var LOGIN_COMMAND = "revefi-agent-analyzer login";
+function auth(e) {
+  const base = apiBase(e);
+  return new Auth({ base, dir: serverDir(e, base), fetch: e.fetch, sleep: e.sleep, env: e.env, loginCommand: LOGIN_COMMAND });
 }
 async function readProcessStdin() {
   let text = "";
@@ -4973,11 +4969,11 @@ function describeLogin(e, p2) {
   ${p2.verification_uri_complete}`);
   e.io.err(`Check that the page shows the code ${p2.user_code}, then continue with Google or an emailed code.`);
 }
-function client(e, api, a = auth(e, api)) {
+function client(e, a = auth(e)) {
   return new Client({
-    base: apiBase(e, api),
+    base: apiBase(e),
     token: (force) => a.accessToken(force),
-    loginCommand: loginCommand(api),
+    loginCommand: LOGIN_COMMAND,
     userAgent: `revefi-agent-analyzer/${e.version}`,
     fetch: e.fetch,
     sleep: e.sleep,
@@ -5097,7 +5093,7 @@ async function prepareFrom(e, values) {
     home: homedir3(),
     maxCompressedBytes: LIMITS.maxCompressedBytes
   });
-  await writeFile4(join7(dir, UPLOAD_TO), `${new URL(apiBase(e, values.api)).host}
+  await writeFile4(join7(dir, UPLOAD_TO), `${new URL(apiBase(e)).host}
 `, { mode: 384 });
   return {
     dir,
@@ -5137,9 +5133,9 @@ function clientName(e) {
 function isPreviewFolder(dir) {
   return basename(dirname2(dir)) === "upload-preview" && basename(dirname2(dirname2(dir))) === ".revefi";
 }
-async function uploadPreview(e, dir, api, a = auth(e, api)) {
+async function uploadPreview(e, dir, a = auth(e)) {
   const meta = await readPreview(dir);
-  await checkHost(dir, apiBase(e, api));
+  await checkHost(dir, apiBase(e));
   await ensureSignedIn(e, a);
   const archive = join7(dir, "upload.tar.gz");
   try {
@@ -5147,7 +5143,7 @@ async function uploadPreview(e, dir, api, a = auth(e, api)) {
     const manifest = buildManifest(meta, packed, { name: clientName(e), version: e.version });
     const problem = limitProblem(manifest);
     if (problem) throw new UserError(problem);
-    const c = client(e, api, a);
+    const c = client(e, a);
     e.io.err(`Uploading ${humanSize(packed.compressed)}...`);
     const run = await c.createRun(manifest);
     await c.upload(run.upload, await openAsBlob(archive));
@@ -5237,7 +5233,6 @@ var COMMANDS = {
     summary: "Sign in with Google or an emailed code (--start and --wait split it in two, for scripts)",
     async run(args, e) {
       const { values } = parse(args, {
-        ...API_OPTION,
         start: { type: "boolean" },
         wait: { type: "boolean" },
         json: { type: "boolean" },
@@ -5245,7 +5240,7 @@ var COMMANDS = {
         timeout: { type: "string" }
       });
       if (values.start && values.wait) throw new UsageError("Use --start or --wait, not both.");
-      const a = auth(e, values.api);
+      const a = auth(e);
       if (values.start) {
         const pending = await a.startLogin();
         if (!values["no-browser"]) (e.openUrl ?? openInBrowser)(pending.verification_uri_complete);
@@ -5259,7 +5254,7 @@ var COMMANDS = {
           );
         } else {
           describeLogin(e, pending);
-          e.io.err(`Then run: ${loginCommand(values.api)} --wait`);
+          e.io.err(`Then run: ${LOGIN_COMMAND} --wait`);
         }
         return 0;
       }
@@ -5273,8 +5268,8 @@ var COMMANDS = {
   logout: {
     summary: "Sign out on this computer",
     async run(args, e) {
-      const { values } = parse(args, API_OPTION);
-      const { signedIn, revoked } = await auth(e, values.api).logout();
+      const { values } = parse(args, {});
+      const { signedIn, revoked } = await auth(e).logout();
       if (!signedIn) e.io.out("You weren't signed in.");
       else if (revoked) e.io.out("Signed out.");
       else e.io.out("Signed out on this computer. The session couldn't be ended on the server; it expires on its own.");
@@ -5284,8 +5279,8 @@ var COMMANDS = {
   whoami: {
     summary: "Show who you're signed in as",
     async run(args, e) {
-      const { values } = parse(args, { ...API_OPTION, json: { type: "boolean" } });
-      const email = await auth(e, values.api).email();
+      const { values } = parse(args, { json: { type: "boolean" } });
+      const email = await auth(e).email();
       e.io.out(values.json ? JSON.stringify({ email }) : email ? `Signed in as ${email}.` : "Signed in (email unavailable).");
       return 0;
     }
@@ -5293,15 +5288,15 @@ var COMMANDS = {
   analyze: {
     summary: "Collect, redact, preview, upload and wait for the report (asks before uploading)",
     async run(args, e) {
-      const { values } = parse(args, { ...SCOPE_OPTIONS, ...API_OPTION, yes: { type: "boolean", short: "y" }, timeout: { type: "string" } });
+      const { values } = parse(args, { ...SCOPE_OPTIONS, yes: { type: "boolean", short: "y" }, timeout: { type: "string" } });
       const timeout = wholeNumber(values.timeout, "--timeout", 30 * 60, 0);
-      const api = apiBase(e, values.api);
-      const a = auth(e, values.api);
+      const api = apiBase(e);
+      const a = auth(e);
       if (e.isTTY) await ensureSignedIn(e, a);
       const p2 = await prepareFrom(e, values);
       describePreview(e, p2, api);
       if (!await consent(e, values, p2.dir)) return 1;
-      return follow(e, await uploadPreview(e, p2.dir, values.api, a), timeout, false);
+      return follow(e, await uploadPreview(e, p2.dir, a), timeout, false);
     }
   },
   projects: {
@@ -5335,8 +5330,8 @@ var COMMANDS = {
   prepare: {
     summary: "Collect and redact sessions into a local preview folder; uploads nothing",
     async run(args, e) {
-      const { values } = parse(args, { ...SCOPE_OPTIONS, ...API_OPTION, json: { type: "boolean" } });
-      const api = apiBase(e, values.api);
+      const { values } = parse(args, { ...SCOPE_OPTIONS, json: { type: "boolean" } });
+      const api = apiBase(e);
       const p2 = await prepareFrom(e, values);
       if (values.json) {
         e.io.out(
@@ -5380,16 +5375,16 @@ var COMMANDS = {
     async run(args, e) {
       const { values, positionals } = parse(
         args,
-        { ...API_OPTION, yes: { type: "boolean", short: "y" }, json: { type: "boolean" }, "no-wait": { type: "boolean" }, timeout: { type: "string" } },
+        { yes: { type: "boolean", short: "y" }, json: { type: "boolean" }, "no-wait": { type: "boolean" }, timeout: { type: "string" } },
         1
       );
       const timeout = wholeNumber(values.timeout, "--timeout", 480, 0);
-      const api = apiBase(e, values.api);
+      const api = apiBase(e);
       const dir = resolve(e.cwd, positionals[0] ?? "");
       const meta = await readPreview(dir);
       if (!values.json) describePreview(e, { dir, meta }, api);
       if (!await consent(e, values, dir)) return 1;
-      const run = await uploadPreview(e, dir, values.api);
+      const run = await uploadPreview(e, dir);
       if (values["no-wait"]) {
         if (values.json) e.io.out(runJson(run.runId, run.reportUrl, run.status));
         else e.io.out(`Follow it with: revefi-agent-analyzer status ${run.runId} --wait`);
@@ -5401,10 +5396,10 @@ var COMMANDS = {
   status: {
     summary: "Show a run's progress; --wait follows it until the report is ready",
     async run(args, e) {
-      const { values, positionals } = parse(args, { ...API_OPTION, wait: { type: "boolean" }, json: { type: "boolean" }, timeout: { type: "string" } }, 1);
+      const { values, positionals } = parse(args, { wait: { type: "boolean" }, json: { type: "boolean" }, timeout: { type: "string" } }, 1);
       const timeout = wholeNumber(values.timeout, "--timeout", 480, 0);
       const runId = positionals[0] ?? "";
-      const c = client(e, values.api);
+      const c = client(e);
       const s3 = await c.status(runId);
       const reportUrl = c.link(s3.report_url);
       if (values.wait) return follow(e, { c, runId, reportUrl }, timeout, Boolean(values.json));
@@ -5415,8 +5410,8 @@ var COMMANDS = {
   recommendations: {
     summary: "Print a finished run's recommendations (--json for the full list)",
     async run(args, e) {
-      const { values, positionals } = parse(args, { ...API_OPTION, json: { type: "boolean" } }, 1);
-      const recs = await client(e, values.api).recommendations(positionals[0] ?? "");
+      const { values, positionals } = parse(args, { json: { type: "boolean" } }, 1);
+      const recs = await client(e).recommendations(positionals[0] ?? "");
       if (values.json) e.io.out(JSON.stringify(recs));
       else printSummary(e, recs);
       return 0;
@@ -5430,11 +5425,9 @@ var COMMANDS = {
       try {
         const input = JSON.parse(await (e.readStdin ?? readProcessStdin)());
         const cmd = hookCommand(input.tool_input?.command);
-        const trusted = apiBase(e);
-        const server = cmd && apiBase(e, cmd.api);
-        if (cmd && server && canonicalHost(new URL(server).host) === canonicalHost(new URL(trusted).host)) {
-          const pending = cmd.kind === "start" ? await auth(e, cmd.api).pendingLogin() : null;
-          message = linkMessage(cmd, input, { apiBase: trusted, pending, canonicalHost });
+        if (cmd) {
+          const pending = cmd.kind === "start" ? await auth(e).pendingLogin() : null;
+          message = linkMessage(cmd, input, { apiBase: apiBase(e), pending, canonicalHost });
         }
       } catch {
       }
@@ -5445,11 +5438,11 @@ var COMMANDS = {
   feedback: {
     summary: "Rate a recommendation: feedback <run> <recommendation> up|down [--applied-pr URL]",
     async run(args, e) {
-      const { values, positionals } = parse(args, { ...API_OPTION, "applied-pr": { type: "string" } }, 3);
+      const { values, positionals } = parse(args, { "applied-pr": { type: "string" } }, 3);
       const [runId = "", recId = "", verdict = ""] = positionals;
       if (verdict !== "up" && verdict !== "down") throw new UsageError("The rating must be up or down.");
       const pr2 = values["applied-pr"];
-      await client(e, values.api).feedback(runId, recId, pr2 ? { verdict, source: "skill", applied_pr_url: pr2 } : { verdict, source: "user" });
+      await client(e).feedback(runId, recId, pr2 ? { verdict, source: "skill", applied_pr_url: pr2 } : { verdict, source: "user" });
       e.io.out(pr2 ? "Recorded the applied fix. Thanks." : "Thanks, your rating was recorded.");
       return 0;
     }
@@ -5459,7 +5452,7 @@ var COMMANDS = {
     async run(args, e) {
       const { values, positionals } = parse(
         args,
-        { ...API_OPTION, add: { type: "string", multiple: true }, remove: { type: "string", multiple: true }, link: { type: "string" }, json: { type: "boolean" } },
+        { add: { type: "string", multiple: true }, remove: { type: "string", multiple: true }, link: { type: "string" }, json: { type: "boolean" } },
         1
       );
       const runId = positionals[0] ?? "";
@@ -5469,7 +5462,7 @@ var COMMANDS = {
       const add2 = (values.add ?? []).map((email) => email.trim().toLowerCase());
       const bad = add2.find((email) => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email));
       if (bad) throw new UsageError(`${bad} isn't an email address.`);
-      const c = client(e, values.api);
+      const c = client(e);
       let sharing = await c.sharing(runId);
       const remove = new Set((values.remove ?? []).map((email) => email.trim().toLowerCase()));
       const next = {
@@ -5491,8 +5484,8 @@ var COMMANDS = {
   "delete-my-data": {
     summary: "Delete every run, upload and report made with your account",
     async run(args, e) {
-      const { values } = parse(args, { ...API_OPTION, yes: { type: "boolean", short: "y" } });
-      const a = auth(e, values.api);
+      const { values } = parse(args, { yes: { type: "boolean", short: "y" } });
+      const a = auth(e);
       const email = await a.email() ?? "your account";
       if (!values.yes) {
         if (!e.isTTY) {
@@ -5504,7 +5497,7 @@ var COMMANDS = {
           return 1;
         }
       }
-      await client(e, values.api, a).deleteMyData();
+      await client(e, a).deleteMyData();
       e.io.out(`Deleted every run, upload and report made with ${email}. Local previews in .revefi/ are untouched.`);
       return 0;
     }
@@ -5523,7 +5516,7 @@ async function askYesNo(question) {
 }
 
 // cli/src/main.ts
-var VERSION = true ? "0.6.1" : "0.0.0-dev";
+var VERSION = true ? "0.7.0" : "0.0.0-dev";
 var USAGE = `Usage: revefi-agent-analyzer <command> [options]
 
 Find repeated work and wasted spend in your Claude Code sessions.
@@ -5553,7 +5546,6 @@ Other options:
   --no-wait              upload: return as soon as the analysis has started
   --timeout SECONDS      How long to wait for the report (analyze 1800, upload and status 480),
                          or for login to be approved (default: until the code expires)
-  --api URL              Analyzer server (default REVEFI_ANALYZER_API, else optimizer.revefi.com)
   -h, --help             Show this help
   -v, --version          Show the version
 
@@ -5561,8 +5553,8 @@ A preview is a folder under .revefi/upload-preview/ holding exactly the redacted
 be sent. It is removed once uploaded.
 
 Exit codes: 0 done, 1 failed or refused, 2 bad usage, 3 the analysis is still running.
-Environment: CLAUDE_CONFIG_DIR (where Claude Code keeps sessions), REVEFI_ANALYZER_API,
-REVEFI_DEBUG=1 (show stack traces).`;
+Environment: CLAUDE_CONFIG_DIR (where Claude Code keeps sessions), REVEFI_DEBUG=1 (show stack
+traces).`;
 var consoleIo = { out: console.log, err: console.error };
 function defaultEnv(io2 = consoleIo) {
   return {
