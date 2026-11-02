@@ -138,8 +138,8 @@ Tell the user, in a few lines:
   known secrets and personal data removed (list what `redactions` found, in plain words), and
   that names and street addresses are not removed;
 - that `REDACTION_REPORT.md` in `preview_dir` lists exactly what would be sent;
-- if `upload_to` is not `optimizer.revefi.com`, say plainly that this is a different server and
-  where that setting can come from (the `REVEFI_ANALYZER_API` environment variable or `--api`).
+- if `upload_to` is not `optimizer.revefi.com`, say plainly that this is a different server: the
+  plugin is a development build.
 
 Then ask with AskUserQuestion: "Upload these N redacted sessions to <upload_to> for analysis?"
 with the options "Upload", "Don't upload" and "Leave some sessions out first".

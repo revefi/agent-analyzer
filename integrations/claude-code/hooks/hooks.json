@@ -1,0 +1,17 @@
+{
+  "description": "Shows the Revefi sign-in and report links whatever the model writes",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "if": "Bash(revefi-agent-analyzer *)", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/revefi-agent-analyzer\" hook", "timeout": 10 }]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "if": "Bash(revefi-agent-analyzer *)", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/revefi-agent-analyzer\" hook", "timeout": 10 }]
+      }
+    ]
+  }
+}

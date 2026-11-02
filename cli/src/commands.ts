@@ -9,6 +9,7 @@ import {
   Client,
   configDir,
   DEFAULT_API,
+  PROD_API,
   FINAL_PHASES,
   ISSUES_URL,
   type Recommendation,
@@ -20,6 +21,7 @@ import { Auth, canonicalHost, type PendingLogin, SignInError } from "./auth.js";
 import { collect, defaultProjectsDir, inRoot, MAX_LOOKBACK_DAYS, pick, type Session, utcToday } from "./collect.js";
 import { buildManifest, LIMITS, limitProblem, pack } from "./pack.js";
 import { applyErrorPicks, parsePicks } from "./errorpick.js";
+import { hookCommand, type HookInput, linkMessage } from "./linkHook.js";
 import { ERROR_CANDIDATES, humanSize, type PreviewMeta, readPreview, REPORT_FILE, writePreview } from "./preview.js";
 
 export interface Io {
@@ -39,6 +41,10 @@ export interface Env {
   configDir?: string;
   /** Opens a URL in the user's browser; defaults to the platform's opener. */
   openUrl?: (url: string) => void;
+  /** The analyzer server; only tests change it, to point at a fake. Defaults to the build's. */
+  api?: string;
+  /** All of stdin; defaults to the process's. */
+  readStdin?: () => Promise<string>;
 }
 
 /** Wrong flags or arguments: shown with the usage text, exit code 2. */
@@ -56,8 +62,6 @@ const SCOPE_OPTIONS = {
   project: { type: "string" },
   "exclude-session": { type: "string", multiple: true },
 } as const satisfies ParseArgsConfig["options"];
-
-const API_OPTION = { api: { type: "string" } } as const satisfies ParseArgsConfig["options"];
 
 function parse<O extends NonNullable<ParseArgsConfig["options"]>>(args: string[], options: O, positionals = 0) {
   let parsed;
@@ -85,9 +89,9 @@ export function projectRoot(cwd: string): string {
   }
 }
 
-/** Transcripts only ever go over HTTPS, except to a server on this machine. */
-function apiBase(e: Env, api?: string): string {
-  const raw = api ?? e.env.REVEFI_ANALYZER_API ?? DEFAULT_API;
+/** The build's server (optimizer.revefi.com); only HTTPS, except to a server on this machine. */
+function apiBase(e: Env): string {
+  const raw = e.api ?? DEFAULT_API;
   let url: URL;
   try {
     url = new URL(raw);
@@ -108,14 +112,21 @@ function apiBase(e: Env, api?: string): string {
 function serverDir(e: Env, base: string): string {
   const root = e.configDir ?? configDir(e.env);
   const host = new URL(base).host;
-  return host === new URL(DEFAULT_API).host ? root : join(root, "servers", host.replace(/[^\w.-]/g, "_"));
+  // Only production's sign-in lives at the top, so a dev build never reads or sends production's tokens.
+  return host === new URL(PROD_API).host ? root : join(root, "servers", host.replace(/[^\w.-]/g, "_"));
 }
 
-const loginCommand = (api?: string) => `revefi-agent-analyzer login${api ? ` --api ${quote(api)}` : ""}`;
+const LOGIN_COMMAND = "revefi-agent-analyzer login";
 
-function auth(e: Env, api?: string): Auth {
-  const base = apiBase(e, api);
-  return new Auth({ base, dir: serverDir(e, base), fetch: e.fetch, sleep: e.sleep, env: e.env, loginCommand: loginCommand(api) });
+function auth(e: Env): Auth {
+  const base = apiBase(e);
+  return new Auth({ base, dir: serverDir(e, base), fetch: e.fetch, sleep: e.sleep, env: e.env, loginCommand: LOGIN_COMMAND });
+}
+
+async function readProcessStdin(): Promise<string> {
+  let text = "";
+  for await (const chunk of process.stdin) text += chunk;
+  return text;
 }
 
 /** Opens the sign-in page without a shell, so the URL is never interpreted as a command. */
@@ -139,11 +150,11 @@ function describeLogin(e: Env, p: PendingLogin): void {
   e.io.err(`Check that the page shows the code ${p.user_code}, then continue with Google or an emailed code.`);
 }
 
-function client(e: Env, api?: string, a: Auth = auth(e, api)): Client {
+function client(e: Env, a: Auth = auth(e)): Client {
   return new Client({
-    base: apiBase(e, api),
+    base: apiBase(e),
     token: (force) => a.accessToken(force),
-    loginCommand: loginCommand(api),
+    loginCommand: LOGIN_COMMAND,
     userAgent: `revefi-agent-analyzer/${e.version}`,
     fetch: e.fetch,
     sleep: e.sleep,
@@ -265,7 +276,7 @@ async function checkHost(dir: string, base: string): Promise<void> {
 
 async function prepareFrom(
   e: Env,
-  values: { days?: string; "all-projects"?: boolean; project?: string; "exclude-session"?: string[]; api?: string },
+  values: { days?: string; "all-projects"?: boolean; project?: string; "exclude-session"?: string[] },
 ): Promise<Prepared> {
   const days = wholeNumber(values.days, "--days", DEFAULT_DAYS, 1, LIMITS.maxDays);
   const root = projectRoot(e.cwd);
@@ -297,7 +308,7 @@ async function prepareFrom(
     home: homedir(),
     maxCompressedBytes: LIMITS.maxCompressedBytes,
   });
-  await writeFile(join(dir, UPLOAD_TO), `${new URL(apiBase(e, values.api)).host}\n`, { mode: 0o600 });
+  await writeFile(join(dir, UPLOAD_TO), `${new URL(apiBase(e)).host}\n`, { mode: 0o600 });
   return {
     dir,
     meta,
@@ -350,9 +361,9 @@ interface Started {
   status: RunStatus;
 }
 
-async function uploadPreview(e: Env, dir: string, api?: string, a: Auth = auth(e, api)): Promise<Started> {
+async function uploadPreview(e: Env, dir: string, a: Auth = auth(e)): Promise<Started> {
   const meta = await readPreview(dir);
-  await checkHost(dir, apiBase(e, api));
+  await checkHost(dir, apiBase(e));
   await ensureSignedIn(e, a);
   const archive = join(dir, "upload.tar.gz");
   try {
@@ -360,7 +371,7 @@ async function uploadPreview(e: Env, dir: string, api?: string, a: Auth = auth(e
     const manifest = buildManifest(meta, packed, { name: clientName(e), version: e.version });
     const problem = limitProblem(manifest);
     if (problem) throw new UserError(problem);
-    const c = client(e, api, a);
+    const c = client(e, a);
     e.io.err(`Uploading ${humanSize(packed.compressed)}...`);
     const run = await c.createRun(manifest);
     await c.upload(run.upload, await openAsBlob(archive));
@@ -455,12 +466,11 @@ async function follow(e: Env, run: Omit<Started, "status">, timeoutSec: number, 
   return finish(e, s, run.runId);
 }
 
-export const COMMANDS: Record<string, { summary: string; run: (args: string[], e: Env) => Promise<number> }> = {
+export const COMMANDS: Record<string, { summary: string; hidden?: boolean; run: (args: string[], e: Env) => Promise<number> }> = {
   login: {
     summary: "Sign in with Google or an emailed code (--start and --wait split it in two, for scripts)",
     async run(args, e) {
       const { values } = parse(args, {
-        ...API_OPTION,
         start: { type: "boolean" },
         wait: { type: "boolean" },
         json: { type: "boolean" },
@@ -468,7 +478,7 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
         timeout: { type: "string" },
       });
       if (values.start && values.wait) throw new UsageError("Use --start or --wait, not both.");
-      const a = auth(e, values.api);
+      const a = auth(e);
       if (values.start) {
         const pending = await a.startLogin();
         if (!values["no-browser"]) (e.openUrl ?? openInBrowser)(pending.verification_uri_complete);
@@ -482,7 +492,7 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
           );
         } else {
           describeLogin(e, pending);
-          e.io.err(`Then run: ${loginCommand(values.api)} --wait`);
+          e.io.err(`Then run: ${LOGIN_COMMAND} --wait`);
         }
         return 0;
       }
@@ -498,8 +508,8 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
   logout: {
     summary: "Sign out on this computer",
     async run(args, e) {
-      const { values } = parse(args, API_OPTION);
-      const { signedIn, revoked } = await auth(e, values.api).logout();
+      const { values } = parse(args, {});
+      const { signedIn, revoked } = await auth(e).logout();
       if (!signedIn) e.io.out("You weren't signed in.");
       else if (revoked) e.io.out("Signed out.");
       else e.io.out("Signed out on this computer. The session couldn't be ended on the server; it expires on its own.");
@@ -509,8 +519,8 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
   whoami: {
     summary: "Show who you're signed in as",
     async run(args, e) {
-      const { values } = parse(args, { ...API_OPTION, json: { type: "boolean" } });
-      const email = await auth(e, values.api).email();
+      const { values } = parse(args, { json: { type: "boolean" } });
+      const email = await auth(e).email();
       e.io.out(values.json ? JSON.stringify({ email }) : email ? `Signed in as ${email}.` : "Signed in (email unavailable).");
       return 0;
     },
@@ -518,17 +528,17 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
   analyze: {
     summary: "Collect, redact, preview, upload and wait for the report (asks before uploading)",
     async run(args, e) {
-      const { values } = parse(args, { ...SCOPE_OPTIONS, ...API_OPTION, yes: { type: "boolean", short: "y" }, timeout: { type: "string" } });
+      const { values } = parse(args, { ...SCOPE_OPTIONS, yes: { type: "boolean", short: "y" }, timeout: { type: "string" } });
       const timeout = wholeNumber(values.timeout, "--timeout", 30 * 60, 0);
-      const api = apiBase(e, values.api);
-      const a = auth(e, values.api);
+      const api = apiBase(e);
+      const a = auth(e);
       // In a terminal, sign in before the preview so the upload never stops for it; elsewhere the
       // upload step reports a missing sign-in.
       if (e.isTTY) await ensureSignedIn(e, a);
       const p = await prepareFrom(e, values);
       describePreview(e, p, api);
       if (!(await consent(e, values, p.dir))) return 1;
-      return follow(e, await uploadPreview(e, p.dir, values.api, a), timeout, false);
+      return follow(e, await uploadPreview(e, p.dir, a), timeout, false);
     },
   },
   projects: {
@@ -564,8 +574,8 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
   prepare: {
     summary: "Collect and redact sessions into a local preview folder; uploads nothing",
     async run(args, e) {
-      const { values } = parse(args, { ...SCOPE_OPTIONS, ...API_OPTION, json: { type: "boolean" } });
-      const api = apiBase(e, values.api);
+      const { values } = parse(args, { ...SCOPE_OPTIONS, json: { type: "boolean" } });
+      const api = apiBase(e);
       const p = await prepareFrom(e, values);
       if (values.json) {
         e.io.out(
@@ -612,16 +622,16 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
     async run(args, e) {
       const { values, positionals } = parse(
         args,
-        { ...API_OPTION, yes: { type: "boolean", short: "y" }, json: { type: "boolean" }, "no-wait": { type: "boolean" }, timeout: { type: "string" } },
+        { yes: { type: "boolean", short: "y" }, json: { type: "boolean" }, "no-wait": { type: "boolean" }, timeout: { type: "string" } },
         1,
       );
       const timeout = wholeNumber(values.timeout, "--timeout", 480, 0);
-      const api = apiBase(e, values.api);
+      const api = apiBase(e);
       const dir = resolve(e.cwd, positionals[0] ?? "");
       const meta = await readPreview(dir);
       if (!values.json) describePreview(e, { dir, meta }, api);
       if (!(await consent(e, values, dir))) return 1;
-      const run = await uploadPreview(e, dir, values.api);
+      const run = await uploadPreview(e, dir);
       if (values["no-wait"]) {
         if (values.json) e.io.out(runJson(run.runId, run.reportUrl, run.status));
         else e.io.out(`Follow it with: revefi-agent-analyzer status ${run.runId} --wait`);
@@ -633,10 +643,10 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
   status: {
     summary: "Show a run's progress; --wait follows it until the report is ready",
     async run(args, e) {
-      const { values, positionals } = parse(args, { ...API_OPTION, wait: { type: "boolean" }, json: { type: "boolean" }, timeout: { type: "string" } }, 1);
+      const { values, positionals } = parse(args, { wait: { type: "boolean" }, json: { type: "boolean" }, timeout: { type: "string" } }, 1);
       const timeout = wholeNumber(values.timeout, "--timeout", 480, 0);
       const runId = positionals[0] ?? "";
-      const c = client(e, values.api);
+      const c = client(e);
       const s = await c.status(runId);
       const reportUrl = c.link(s.report_url);
       if (values.wait) return follow(e, { c, runId, reportUrl }, timeout, Boolean(values.json));
@@ -647,21 +657,40 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
   recommendations: {
     summary: "Print a finished run's recommendations (--json for the full list)",
     async run(args, e) {
-      const { values, positionals } = parse(args, { ...API_OPTION, json: { type: "boolean" } }, 1);
-      const recs = await client(e, values.api).recommendations(positionals[0] ?? "");
+      const { values, positionals } = parse(args, { json: { type: "boolean" } }, 1);
+      const recs = await client(e).recommendations(positionals[0] ?? "");
       if (values.json) e.io.out(JSON.stringify(recs));
       else printSummary(e, recs);
+      return 0;
+    },
+  },
+  hook: {
+    summary: "Used by the Claude Code plugin to show the sign-in and report links",
+    hidden: true,
+    async run(_args, e) {
+      let message: string | null = null;
+      try {
+        const input = JSON.parse(await (e.readStdin ?? readProcessStdin)()) as HookInput;
+        const cmd = hookCommand(input.tool_input?.command);
+        if (cmd) {
+          const pending = cmd.kind === "start" ? await auth(e).pendingLogin() : null;
+          message = linkMessage(cmd, input, { apiBase: apiBase(e), pending, canonicalHost });
+        }
+      } catch {
+        // A hook must never break the tool call it follows; without a message Claude Code shows nothing extra.
+      }
+      if (message) e.io.out(JSON.stringify({ systemMessage: message }));
       return 0;
     },
   },
   feedback: {
     summary: "Rate a recommendation: feedback <run> <recommendation> up|down [--applied-pr URL]",
     async run(args, e) {
-      const { values, positionals } = parse(args, { ...API_OPTION, "applied-pr": { type: "string" } }, 3);
+      const { values, positionals } = parse(args, { "applied-pr": { type: "string" } }, 3);
       const [runId = "", recId = "", verdict = ""] = positionals;
       if (verdict !== "up" && verdict !== "down") throw new UsageError("The rating must be up or down.");
       const pr = values["applied-pr"];
-      await client(e, values.api).feedback(runId, recId, pr ? { verdict, source: "skill", applied_pr_url: pr } : { verdict, source: "user" });
+      await client(e).feedback(runId, recId, pr ? { verdict, source: "skill", applied_pr_url: pr } : { verdict, source: "user" });
       e.io.out(pr ? "Recorded the applied fix. Thanks." : "Thanks, your rating was recorded.");
       return 0;
     },
@@ -671,7 +700,7 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
     async run(args, e) {
       const { values, positionals } = parse(
         args,
-        { ...API_OPTION, add: { type: "string", multiple: true }, remove: { type: "string", multiple: true }, link: { type: "string" }, json: { type: "boolean" } },
+        { add: { type: "string", multiple: true }, remove: { type: "string", multiple: true }, link: { type: "string" }, json: { type: "boolean" } },
         1,
       );
       const runId = positionals[0] ?? "";
@@ -681,7 +710,7 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
       const add = (values.add ?? []).map((email) => email.trim().toLowerCase());
       const bad = add.find((email) => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email));
       if (bad) throw new UsageError(`${bad} isn't an email address.`);
-      const c = client(e, values.api);
+      const c = client(e);
       let sharing = await c.sharing(runId);
       const remove = new Set((values.remove ?? []).map((email) => email.trim().toLowerCase()));
       const next: Sharing = {
@@ -703,8 +732,8 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
   "delete-my-data": {
     summary: "Delete every run, upload and report made with your account",
     async run(args, e) {
-      const { values } = parse(args, { ...API_OPTION, yes: { type: "boolean", short: "y" } });
-      const a = auth(e, values.api);
+      const { values } = parse(args, { yes: { type: "boolean", short: "y" } });
+      const a = auth(e);
       const email = (await a.email()) ?? "your account";
       if (!values.yes) {
         if (!e.isTTY) {
@@ -716,7 +745,7 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
           return 1;
         }
       }
-      await client(e, values.api, a).deleteMyData();
+      await client(e, a).deleteMyData();
       e.io.out(`Deleted every run, upload and report made with ${email}. Local previews in .revefi/ are untouched.`);
       return 0;
     },

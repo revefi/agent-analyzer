@@ -321,6 +321,12 @@ export class Auth {
   }
 
   /** Waits for the user to approve the pending login, then stores the refresh token. */
+  /** The sign-in `login --start` began, whose link it already checked, or null when none is waiting. */
+  async pendingLogin(): Promise<PendingLogin | null> {
+    const pending = await this.readJson<PendingLogin>(PENDING);
+    return pending && this.now() < pending.expires_at ? pending : null;
+  }
+
   async finishLogin(opts: { timeoutMs?: number } = {}): Promise<{ email: string | null }> {
     const pending = await this.readJson<PendingLogin>(PENDING);
     if (!pending) throw new SignInError(`No sign-in is in progress. Run \`${this.login}\` to start one.`);

@@ -36,6 +36,10 @@ whichever is more, keeping the newest that fit in 200 MB compressed. The first t
 sign in with Google or an emailed code. Needs Node.js 22.12 or newer, and Claude Code in a
 terminal, an IDE or the Claude desktop app.
 
+The plugin also adds one hook. It runs only after the plugin's own `revefi-agent-analyzer`
+commands, reads their output, and shows you the sign-in or report link they printed. It sends
+nothing anywhere.
+
 ## Redaction
 
 Nothing leaves your machine until you approve. First you get a preview of the exact files that
@@ -59,6 +63,14 @@ anyone with the link, or to delete everything you've uploaded.
 
 ```bash
 pnpm install && pnpm test && pnpm build
+```
+
+The CLI talks only to optimizer.revefi.com. To test against another server, build a development
+copy with that server baked in, and load it with `claude --plugin-dir integrations/claude-code`.
+Don't commit that bundle; run `pnpm build` again before you do.
+
+```bash
+ANALYZER_BUILD_API=https://dev-analyzer.revefi.com pnpm build
 ```
 
 ## Security and license
