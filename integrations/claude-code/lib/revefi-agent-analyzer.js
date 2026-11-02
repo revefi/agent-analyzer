@@ -5430,9 +5430,11 @@ var COMMANDS = {
       try {
         const input = JSON.parse(await (e.readStdin ?? readProcessStdin)());
         const cmd = hookCommand(input.tool_input?.command);
-        if (cmd) {
+        const trusted = apiBase(e);
+        const server = cmd && apiBase(e, cmd.api);
+        if (cmd && server && canonicalHost(new URL(server).host) === canonicalHost(new URL(trusted).host)) {
           const pending = cmd.kind === "start" ? await auth(e, cmd.api).pendingLogin() : null;
-          message = linkMessage(cmd, input, { apiBase: apiBase(e, cmd.api), pending, canonicalHost });
+          message = linkMessage(cmd, input, { apiBase: trusted, pending, canonicalHost });
         }
       } catch {
       }

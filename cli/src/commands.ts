@@ -671,9 +671,13 @@ export const COMMANDS: Record<string, { summary: string; hidden?: boolean; run: 
       try {
         const input = JSON.parse(await (e.readStdin ?? readProcessStdin)()) as HookInput;
         const cmd = hookCommand(input.tool_input?.command);
-        if (cmd) {
+        // Messages carry Revefi's name, so the server they speak for comes from this process's own
+        // settings (the default, or REVEFI_ANALYZER_API), never from the command line.
+        const trusted = apiBase(e);
+        const server = cmd && apiBase(e, cmd.api);
+        if (cmd && server && canonicalHost(new URL(server).host) === canonicalHost(new URL(trusted).host)) {
           const pending = cmd.kind === "start" ? await auth(e, cmd.api).pendingLogin() : null;
-          message = linkMessage(cmd, input, { apiBase: apiBase(e, cmd.api), pending, canonicalHost });
+          message = linkMessage(cmd, input, { apiBase: trusted, pending, canonicalHost });
         }
       } catch {
         // A hook must never break the tool call it follows; without a message Claude Code shows nothing extra.
