@@ -15,6 +15,7 @@ Find repeated work and wasted spend in your Claude Code sessions.
 
 Commands:
 ${Object.entries(COMMANDS)
+  .filter(([, c]) => !c.hidden)
   .map(([name, c]) => `  ${name.padEnd(17)}${c.summary}`)
   .join("\n")}
 

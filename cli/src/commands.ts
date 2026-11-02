@@ -20,6 +20,7 @@ import { Auth, canonicalHost, type PendingLogin, SignInError } from "./auth.js";
 import { collect, defaultProjectsDir, inRoot, MAX_LOOKBACK_DAYS, pick, type Session, utcToday } from "./collect.js";
 import { buildManifest, LIMITS, limitProblem, pack } from "./pack.js";
 import { applyErrorPicks, parsePicks } from "./errorpick.js";
+import { linkMessage } from "./linkHook.js";
 import { ERROR_CANDIDATES, humanSize, type PreviewMeta, readPreview, REPORT_FILE, writePreview } from "./preview.js";
 
 export interface Io {
@@ -39,6 +40,8 @@ export interface Env {
   configDir?: string;
   /** Opens a URL in the user's browser; defaults to the platform's opener. */
   openUrl?: (url: string) => void;
+  /** All of stdin; defaults to the process's. */
+  readStdin?: () => Promise<string>;
 }
 
 /** Wrong flags or arguments: shown with the usage text, exit code 2. */
@@ -116,6 +119,12 @@ const loginCommand = (api?: string) => `revefi-agent-analyzer login${api ? ` --a
 function auth(e: Env, api?: string): Auth {
   const base = apiBase(e, api);
   return new Auth({ base, dir: serverDir(e, base), fetch: e.fetch, sleep: e.sleep, env: e.env, loginCommand: loginCommand(api) });
+}
+
+async function readProcessStdin(): Promise<string> {
+  let text = "";
+  for await (const chunk of process.stdin) text += chunk;
+  return text;
 }
 
 /** Opens the sign-in page without a shell, so the URL is never interpreted as a command. */
@@ -455,7 +464,7 @@ async function follow(e: Env, run: Omit<Started, "status">, timeoutSec: number, 
   return finish(e, s, run.runId);
 }
 
-export const COMMANDS: Record<string, { summary: string; run: (args: string[], e: Env) => Promise<number> }> = {
+export const COMMANDS: Record<string, { summary: string; hidden?: boolean; run: (args: string[], e: Env) => Promise<number> }> = {
   login: {
     summary: "Sign in with Google or an emailed code (--start and --wait split it in two, for scripts)",
     async run(args, e) {
@@ -651,6 +660,20 @@ export const COMMANDS: Record<string, { summary: string; run: (args: string[], e
       const recs = await client(e, values.api).recommendations(positionals[0] ?? "");
       if (values.json) e.io.out(JSON.stringify(recs));
       else printSummary(e, recs);
+      return 0;
+    },
+  },
+  hook: {
+    summary: "Used by the Claude Code plugin to show the sign-in and report links",
+    hidden: true,
+    async run(_args, e) {
+      let message: string | null = null;
+      try {
+        message = linkMessage(JSON.parse(await (e.readStdin ?? readProcessStdin)()));
+      } catch {
+        // A hook must never break the tool call it follows; without a message Claude Code shows nothing extra.
+      }
+      if (message) e.io.out(JSON.stringify({ systemMessage: message }));
       return 0;
     },
   },

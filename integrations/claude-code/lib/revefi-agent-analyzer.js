@@ -4838,6 +4838,46 @@ async function applyErrorPicks(dir, picks) {
   return { applied, ignored };
 }
 
+// cli/src/linkHook.ts
+var SAFE_URL = /^https?:\/\/[^\s\u0000-\u001f\u007f-\u009f]+$/;
+var SAFE_CODE = /^[A-Z0-9-]{4,32}$/;
+var FINAL_PHASES2 = /* @__PURE__ */ new Set(["done", "failed", "deferred"]);
+function jsonFrom(text) {
+  for (const line of text.split("\n")) {
+    if (!line.startsWith("{")) continue;
+    try {
+      const value = JSON.parse(line);
+      if (value && typeof value === "object" && !Array.isArray(value)) return value;
+    } catch {
+    }
+  }
+  return null;
+}
+var str = (v2) => typeof v2 === "string" ? v2 : void 0;
+function linkMessage(input) {
+  const command = str(input.tool_input?.command) ?? "";
+  const output = str(input.tool_response?.stdout) ?? str(input.error) ?? "";
+  const body = jsonFrom(output);
+  if (!body) return null;
+  if (/\blogin\b/.test(command) && /--start\b/.test(command)) {
+    const url2 = str(body.verification_uri_complete);
+    const code = str(body.user_code);
+    if (!url2 || !SAFE_URL.test(url2) || !code || !SAFE_CODE.test(code)) return null;
+    return `Sign in to Revefi: open this link and check it shows the code ${code}.
+${url2}`;
+  }
+  const url = str(body.report_url);
+  if (!url || !SAFE_URL.test(url)) return null;
+  if (/\bupload\b/.test(command)) return `Your Revefi report (it fills in as the analysis runs):
+${url}`;
+  if (/\bstatus\b/.test(command) && FINAL_PHASES2.has(str(body.phase) ?? "")) {
+    return body.phase === "done" ? `Your Revefi report is ready:
+${url}` : `Your Revefi report:
+${url}`;
+  }
+  return null;
+}
+
 // cli/src/commands.ts
 var UsageError = class extends Error {
 };
@@ -4895,6 +4935,11 @@ var loginCommand = (api) => `revefi-agent-analyzer login${api ? ` --api ${quote(
 function auth(e, api) {
   const base = apiBase(e, api);
   return new Auth({ base, dir: serverDir(e, base), fetch: e.fetch, sleep: e.sleep, env: e.env, loginCommand: loginCommand(api) });
+}
+async function readProcessStdin() {
+  let text = "";
+  for await (const chunk of process.stdin) text += chunk;
+  return text;
 }
 function openInBrowser(url) {
   if (process.env.SSH_CONNECTION || process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return;
@@ -5357,6 +5402,19 @@ var COMMANDS = {
       return 0;
     }
   },
+  hook: {
+    summary: "Used by the Claude Code plugin to show the sign-in and report links",
+    hidden: true,
+    async run(_args, e) {
+      let message = null;
+      try {
+        message = linkMessage(JSON.parse(await (e.readStdin ?? readProcessStdin)()));
+      } catch {
+      }
+      if (message) e.io.out(JSON.stringify({ systemMessage: message }));
+      return 0;
+    }
+  },
   feedback: {
     summary: "Rate a recommendation: feedback <run> <recommendation> up|down [--applied-pr URL]",
     async run(args, e) {
@@ -5438,13 +5496,13 @@ async function askYesNo(question) {
 }
 
 // cli/src/main.ts
-var VERSION = true ? "0.6.0" : "0.0.0-dev";
+var VERSION = true ? "0.6.1" : "0.0.0-dev";
 var USAGE = `Usage: revefi-agent-analyzer <command> [options]
 
 Find repeated work and wasted spend in your Claude Code sessions.
 
 Commands:
-${Object.entries(COMMANDS).map(([name, c]) => `  ${name.padEnd(17)}${c.summary}`).join("\n")}
+${Object.entries(COMMANDS).filter(([, c]) => !c.hidden).map(([name, c]) => `  ${name.padEnd(17)}${c.summary}`).join("\n")}
 
 Options for analyze, prepare and projects:
   --days N               Days of history to analyze, 1-14 (default 14, or the latest 100
