@@ -1,53 +1,86 @@
 /**
  * Claude Code shows a hook's `systemMessage` to the user whatever the model writes, so the plugin
  * prints the sign-in and report links from here rather than trusting the model to repeat them.
+ * The message carries Revefi's name, so it only ever shows a link this CLI produced for its server.
  */
 
-interface HookInput {
+export interface HookInput {
   tool_input?: { command?: unknown };
   tool_response?: { stdout?: unknown };
   error?: unknown;
 }
 
-// Only text the CLI itself produced: a URL with no spaces or control characters, and a code made of
-// the characters Auth0 uses, so nothing in a crafted output can style or rewrite the terminal.
-const SAFE_URL = /^https?:\/\/[^\s\u0000-\u001f\u007f-\u009f]+$/;
-const SAFE_CODE = /^[A-Z0-9-]{4,32}$/;
+export type HookCommand = { kind: "start" | "upload" | "status"; api?: string };
+
+// One plain invocation: anything that could run a second program, or feed it, is refused.
+const SHELL_SYNTAX = /[;&|`$<>(){}\\\n\r]/;
+// Printable text only, so nothing can style or rewrite the terminal.
+const PLAIN = /^[^\s\u0000-\u001f\u007f-\u009f]+$/;
+const CODE = /^[A-Z0-9-]{4,32}$/;
 const FINAL_PHASES = new Set(["done", "failed", "deferred"]);
 
-/** The first line of output that parses as a JSON object. A failed call's text is `Exit code N`, stdout, then stderr. */
-function jsonFrom(text: string): Record<string, unknown> | null {
-  for (const line of text.split("\n")) {
-    if (!line.startsWith("{")) continue;
-    try {
-      const value: unknown = JSON.parse(line);
-      if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
-    } catch {
-      // Not the JSON line; keep looking.
-    }
-  }
-  return null;
+/** Which of the plugin's own commands this is, or null for anything else. */
+export function hookCommand(command: unknown): HookCommand | null {
+  if (typeof command !== "string" || SHELL_SYNTAX.test(command)) return null;
+  const words = command.trim().split(/\s+/);
+  if (words[0] !== "revefi-agent-analyzer") return null;
+  const sub = words[1];
+  const kind = sub === "login" && words.includes("--start") ? "start" : sub === "upload" ? "upload" : sub === "status" ? "status" : null;
+  if (!kind) return null;
+  const at = words.findIndex((w) => w === "--api" || w.startsWith("--api="));
+  const flag = at < 0 ? undefined : words[at];
+  const raw = flag === undefined ? undefined : flag === "--api" ? words[at + 1] : flag.slice("--api=".length);
+  return { kind, api: raw?.replace(/^['"]|['"]$/g, "") };
 }
 
-const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+/**
+ * The CLI's own JSON line: all of stdout, or for a failed call the first JSON line after
+ * `Exit code N`. Claude Code interleaves a failed call's stdout and stderr in time order, so
+ * progress lines can come first; with one bare invocation, every line is still this CLI's.
+ */
+function cliJson(input: HookInput): Record<string, unknown> | null {
+  const stdout = typeof input.tool_response?.stdout === "string" ? input.tool_response.stdout : undefined;
+  const failed =
+    typeof input.error === "string" && /^Exit code \d+\n/.test(input.error)
+      ? input.error.split("\n").slice(1).find((line) => line.startsWith("{"))
+      : undefined;
+  const text = (stdout ?? failed ?? "").trim();
+  if (!text.startsWith("{") || text.includes("\n")) return null;
+  try {
+    const value: unknown = JSON.parse(text);
+    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
 
-/** The message to show for one finished Bash call, or null when it printed no link worth repeating. */
-export function linkMessage(input: HookInput): string | null {
-  const command = str(input.tool_input?.command) ?? "";
-  const output = str(input.tool_response?.stdout) ?? str(input.error) ?? "";
-  const body = jsonFrom(output);
-  if (!body) return null;
-  if (/\blogin\b/.test(command) && /--start\b/.test(command)) {
-    const url = str(body.verification_uri_complete);
-    const code = str(body.user_code);
-    if (!url || !SAFE_URL.test(url) || !code || !SAFE_CODE.test(code)) return null;
-    return `Sign in to Revefi: open this link and check it shows the code ${code}.\n${url}`;
+function sameServer(link: string, apiBase: string, canonicalHost: (host: string) => string): boolean {
+  try {
+    const [url, api] = [new URL(link), new URL(apiBase)];
+    return url.protocol === api.protocol && canonicalHost(url.host) === canonicalHost(api.host) && !url.username && !url.password;
+  } catch {
+    return false;
   }
-  const url = str(body.report_url);
-  if (!url || !SAFE_URL.test(url)) return null;
-  if (/\bupload\b/.test(command)) return `Your Revefi report (it fills in as the analysis runs):\n${url}`;
-  if (/\bstatus\b/.test(command) && FINAL_PHASES.has(str(body.phase) ?? "")) {
-    return body.phase === "done" ? `Your Revefi report is ready:\n${url}` : `Your Revefi report:\n${url}`;
+}
+
+export interface LinkContext {
+  apiBase: string;
+  /** The sign-in this CLI started and validated; only consulted after `login --start`. */
+  pending: { verification_uri_complete: string; user_code: string } | null;
+  canonicalHost: (host: string) => string;
+}
+
+/** The message to show for one finished call, or null when it printed no link worth repeating. */
+export function linkMessage(cmd: HookCommand, input: HookInput, ctx: LinkContext): string | null {
+  if (cmd.kind === "start") {
+    const p = ctx.pending;
+    if (!p || !PLAIN.test(p.verification_uri_complete) || !CODE.test(p.user_code)) return null;
+    return `Sign in to Revefi: open this link and check it shows the code ${p.user_code}.\n${p.verification_uri_complete}`;
   }
-  return null;
+  const body = cliJson(input);
+  const url = typeof body?.report_url === "string" ? body.report_url : undefined;
+  if (!url || !PLAIN.test(url) || !sameServer(url, ctx.apiBase, ctx.canonicalHost)) return null;
+  if (cmd.kind === "upload") return `Your Revefi report (it fills in as the analysis runs):\n${url}`;
+  if (!FINAL_PHASES.has(String(body?.phase))) return null;
+  return body?.phase === "done" ? `Your Revefi report is ready:\n${url}` : `Your Revefi report:\n${url}`;
 }

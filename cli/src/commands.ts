@@ -20,7 +20,7 @@ import { Auth, canonicalHost, type PendingLogin, SignInError } from "./auth.js";
 import { collect, defaultProjectsDir, inRoot, MAX_LOOKBACK_DAYS, pick, type Session, utcToday } from "./collect.js";
 import { buildManifest, LIMITS, limitProblem, pack } from "./pack.js";
 import { applyErrorPicks, parsePicks } from "./errorpick.js";
-import { linkMessage } from "./linkHook.js";
+import { hookCommand, type HookInput, linkMessage } from "./linkHook.js";
 import { ERROR_CANDIDATES, humanSize, type PreviewMeta, readPreview, REPORT_FILE, writePreview } from "./preview.js";
 
 export interface Io {
@@ -669,7 +669,12 @@ export const COMMANDS: Record<string, { summary: string; hidden?: boolean; run: 
     async run(_args, e) {
       let message: string | null = null;
       try {
-        message = linkMessage(JSON.parse(await (e.readStdin ?? readProcessStdin)()));
+        const input = JSON.parse(await (e.readStdin ?? readProcessStdin)()) as HookInput;
+        const cmd = hookCommand(input.tool_input?.command);
+        if (cmd) {
+          const pending = cmd.kind === "start" ? await auth(e, cmd.api).pendingLogin() : null;
+          message = linkMessage(cmd, input, { apiBase: apiBase(e, cmd.api), pending, canonicalHost });
+        }
       } catch {
         // A hook must never break the tool call it follows; without a message Claude Code shows nothing extra.
       }

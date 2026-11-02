@@ -245,6 +245,11 @@ var Auth = class {
     return new SignInError(`The sign-in code expired. Run \`${this.login}\` again.`, "signed_out");
   }
   /** Waits for the user to approve the pending login, then stores the refresh token. */
+  /** The sign-in `login --start` began, whose link it already checked, or null when none is waiting. */
+  async pendingLogin() {
+    const pending = await this.readJson(PENDING);
+    return pending && this.now() < pending.expires_at ? pending : null;
+  }
   async finishLogin(opts = {}) {
     const pending = await this.readJson(PENDING);
     if (!pending) throw new SignInError(`No sign-in is in progress. Run \`${this.login}\` to start one.`);
@@ -4839,43 +4844,58 @@ async function applyErrorPicks(dir, picks) {
 }
 
 // cli/src/linkHook.ts
-var SAFE_URL = /^https?:\/\/[^\s\u0000-\u001f\u007f-\u009f]+$/;
-var SAFE_CODE = /^[A-Z0-9-]{4,32}$/;
+var SHELL_SYNTAX = /[;&|`$<>(){}\\\n\r]/;
+var PLAIN = /^[^\s\u0000-\u001f\u007f-\u009f]+$/;
+var CODE = /^[A-Z0-9-]{4,32}$/;
 var FINAL_PHASES2 = /* @__PURE__ */ new Set(["done", "failed", "deferred"]);
-function jsonFrom(text) {
-  for (const line of text.split("\n")) {
-    if (!line.startsWith("{")) continue;
-    try {
-      const value = JSON.parse(line);
-      if (value && typeof value === "object" && !Array.isArray(value)) return value;
-    } catch {
-    }
-  }
-  return null;
+function hookCommand(command) {
+  if (typeof command !== "string" || SHELL_SYNTAX.test(command)) return null;
+  const words = command.trim().split(/\s+/);
+  if (words[0] !== "revefi-agent-analyzer") return null;
+  const sub = words[1];
+  const kind = sub === "login" && words.includes("--start") ? "start" : sub === "upload" ? "upload" : sub === "status" ? "status" : null;
+  if (!kind) return null;
+  const at2 = words.findIndex((w2) => w2 === "--api" || w2.startsWith("--api="));
+  const flag = at2 < 0 ? void 0 : words[at2];
+  const raw = flag === void 0 ? void 0 : flag === "--api" ? words[at2 + 1] : flag.slice("--api=".length);
+  return { kind, api: raw?.replace(/^['"]|['"]$/g, "") };
 }
-var str = (v2) => typeof v2 === "string" ? v2 : void 0;
-function linkMessage(input) {
-  const command = str(input.tool_input?.command) ?? "";
-  const output = str(input.tool_response?.stdout) ?? str(input.error) ?? "";
-  const body = jsonFrom(output);
-  if (!body) return null;
-  if (/\blogin\b/.test(command) && /--start\b/.test(command)) {
-    const url2 = str(body.verification_uri_complete);
-    const code = str(body.user_code);
-    if (!url2 || !SAFE_URL.test(url2) || !code || !SAFE_CODE.test(code)) return null;
-    return `Sign in to Revefi: open this link and check it shows the code ${code}.
-${url2}`;
+function cliJson(input) {
+  const stdout = typeof input.tool_response?.stdout === "string" ? input.tool_response.stdout : void 0;
+  const failed = typeof input.error === "string" && /^Exit code \d+\n/.test(input.error) ? input.error.split("\n").slice(1).find((line) => line.startsWith("{")) : void 0;
+  const text = (stdout ?? failed ?? "").trim();
+  if (!text.startsWith("{") || text.includes("\n")) return null;
+  try {
+    const value = JSON.parse(text);
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
   }
-  const url = str(body.report_url);
-  if (!url || !SAFE_URL.test(url)) return null;
-  if (/\bupload\b/.test(command)) return `Your Revefi report (it fills in as the analysis runs):
+}
+function sameServer(link2, apiBase2, canonicalHost2) {
+  try {
+    const [url, api] = [new URL(link2), new URL(apiBase2)];
+    return url.protocol === api.protocol && canonicalHost2(url.host) === canonicalHost2(api.host) && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+function linkMessage(cmd, input, ctx) {
+  if (cmd.kind === "start") {
+    const p2 = ctx.pending;
+    if (!p2 || !PLAIN.test(p2.verification_uri_complete) || !CODE.test(p2.user_code)) return null;
+    return `Sign in to Revefi: open this link and check it shows the code ${p2.user_code}.
+${p2.verification_uri_complete}`;
+  }
+  const body = cliJson(input);
+  const url = typeof body?.report_url === "string" ? body.report_url : void 0;
+  if (!url || !PLAIN.test(url) || !sameServer(url, ctx.apiBase, ctx.canonicalHost)) return null;
+  if (cmd.kind === "upload") return `Your Revefi report (it fills in as the analysis runs):
 ${url}`;
-  if (/\bstatus\b/.test(command) && FINAL_PHASES2.has(str(body.phase) ?? "")) {
-    return body.phase === "done" ? `Your Revefi report is ready:
+  if (!FINAL_PHASES2.has(String(body?.phase))) return null;
+  return body?.phase === "done" ? `Your Revefi report is ready:
 ${url}` : `Your Revefi report:
 ${url}`;
-  }
-  return null;
 }
 
 // cli/src/commands.ts
@@ -5408,7 +5428,12 @@ var COMMANDS = {
     async run(_args, e) {
       let message = null;
       try {
-        message = linkMessage(JSON.parse(await (e.readStdin ?? readProcessStdin)()));
+        const input = JSON.parse(await (e.readStdin ?? readProcessStdin)());
+        const cmd = hookCommand(input.tool_input?.command);
+        if (cmd) {
+          const pending = cmd.kind === "start" ? await auth(e, cmd.api).pendingLogin() : null;
+          message = linkMessage(cmd, input, { apiBase: apiBase(e, cmd.api), pending, canonicalHost });
+        }
       } catch {
       }
       if (message) e.io.out(JSON.stringify({ systemMessage: message }));
