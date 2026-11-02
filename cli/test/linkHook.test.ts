@@ -84,9 +84,11 @@ describe("linkMessage", () => {
     expect(message(upload(`${REPORT}\u001b]8;;x\u0007`))).toBeNull();
   });
 
-  it("only reads the CLI's own JSON line", () => {
+  it("finds the CLI's JSON line after its progress lines, which Claude Code merges into stdout", () => {
     const cmd = "revefi-agent-analyzer upload x --json";
-    expect(message({ tool_input: { command: cmd }, tool_response: { stdout: `noise\n${JSON.stringify({ report_url: REPORT })}` } })).toBeNull();
+    expect(message({ tool_input: { command: cmd }, tool_response: { stdout: `Uploading 2.4 MB...\n${JSON.stringify({ report_url: REPORT })}\nRun r1 started.` } })).toBe(
+      `Your Revefi report (it fills in as the analysis runs):\n${REPORT}`,
+    );
     expect(message({ tool_input: { command: cmd }, error: `not a failed call\n${JSON.stringify({ report_url: REPORT })}` })).toBeNull();
     expect(message({ tool_input: { command: cmd }, tool_response: { stdout: "not json" } })).toBeNull();
   });

@@ -9,6 +9,7 @@ import {
   Client,
   configDir,
   DEFAULT_API,
+  PROD_API,
   FINAL_PHASES,
   ISSUES_URL,
   type Recommendation,
@@ -111,7 +112,8 @@ function apiBase(e: Env): string {
 function serverDir(e: Env, base: string): string {
   const root = e.configDir ?? configDir(e.env);
   const host = new URL(base).host;
-  return host === new URL(DEFAULT_API).host ? root : join(root, "servers", host.replace(/[^\w.-]/g, "_"));
+  // Only production's sign-in lives at the top, so a dev build never reads or sends production's tokens.
+  return host === new URL(PROD_API).host ? root : join(root, "servers", host.replace(/[^\w.-]/g, "_"));
 }
 
 const LOGIN_COMMAND = "revefi-agent-analyzer login";

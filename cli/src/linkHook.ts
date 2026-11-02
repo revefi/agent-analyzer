@@ -32,20 +32,17 @@ export function hookCommand(command: unknown): HookCommand | null {
 }
 
 /**
- * The CLI's own JSON line: all of stdout, or for a failed call the first JSON line after
- * `Exit code N`. Claude Code interleaves a failed call's stdout and stderr in time order, so
- * progress lines can come first; with one bare invocation, every line is still this CLI's.
+ * The CLI's JSON line. Claude Code merges stderr into stdout in time order (and a failed call's
+ * text starts with `Exit code N`), so progress lines can come first; with one bare invocation,
+ * every line is still this CLI's, and the link it carries is checked against the server below.
  */
 function cliJson(input: HookInput): Record<string, unknown> | null {
   const stdout = typeof input.tool_response?.stdout === "string" ? input.tool_response.stdout : undefined;
-  const failed =
-    typeof input.error === "string" && /^Exit code \d+\n/.test(input.error)
-      ? input.error.split("\n").slice(1).find((line) => line.startsWith("{"))
-      : undefined;
-  const text = (stdout ?? failed ?? "").trim();
-  if (!text.startsWith("{") || text.includes("\n")) return null;
+  const error = typeof input.error === "string" && /^Exit code \d+\n/.test(input.error) ? input.error : undefined;
+  const line = (stdout ?? error ?? "").split("\n").find((l) => l.startsWith("{"));
+  if (!line) return null;
   try {
-    const value: unknown = JSON.parse(text);
+    const value: unknown = JSON.parse(line);
     return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
   } catch {
     return null;

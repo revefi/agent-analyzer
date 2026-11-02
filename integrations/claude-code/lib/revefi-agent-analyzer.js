@@ -369,7 +369,8 @@ var Auth = class {
 };
 
 // cli/src/api.ts
-var DEFAULT_API = true ? "https://optimizer.revefi.com" : "https://optimizer.revefi.com";
+var PROD_API = "https://optimizer.revefi.com";
+var DEFAULT_API = true ? "https://optimizer.revefi.com" : PROD_API;
 var ISSUES_URL = "https://github.com/revefi/agent-analyzer/issues";
 var FINAL_PHASES = ["done", "failed", "deferred"];
 var ApiError = class extends Error {
@@ -4859,11 +4860,11 @@ function hookCommand(command) {
 }
 function cliJson(input) {
   const stdout = typeof input.tool_response?.stdout === "string" ? input.tool_response.stdout : void 0;
-  const failed = typeof input.error === "string" && /^Exit code \d+\n/.test(input.error) ? input.error.split("\n").slice(1).find((line) => line.startsWith("{")) : void 0;
-  const text = (stdout ?? failed ?? "").trim();
-  if (!text.startsWith("{") || text.includes("\n")) return null;
+  const error = typeof input.error === "string" && /^Exit code \d+\n/.test(input.error) ? input.error : void 0;
+  const line = (stdout ?? error ?? "").split("\n").find((l) => l.startsWith("{"));
+  if (!line) return null;
   try {
-    const value = JSON.parse(text);
+    const value = JSON.parse(line);
     return value && typeof value === "object" && !Array.isArray(value) ? value : null;
   } catch {
     return null;
@@ -4945,7 +4946,7 @@ function apiBase(e) {
 function serverDir(e, base) {
   const root = e.configDir ?? configDir(e.env);
   const host = new URL(base).host;
-  return host === new URL(DEFAULT_API).host ? root : join7(root, "servers", host.replace(/[^\w.-]/g, "_"));
+  return host === new URL(PROD_API).host ? root : join7(root, "servers", host.replace(/[^\w.-]/g, "_"));
 }
 var LOGIN_COMMAND = "revefi-agent-analyzer login";
 function auth(e) {
