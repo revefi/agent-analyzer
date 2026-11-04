@@ -4,13 +4,29 @@
     "PostToolUse": [
       {
         "matcher": "Bash",
-        "hooks": [{ "type": "command", "if": "Bash(revefi-agent-analyzer *)", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/revefi-agent-analyzer\" hook", "timeout": 10 }]
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(revefi-agent-analyzer *)",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/lib/revefi-agent-analyzer.js", "hook"],
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolUseFailure": [
       {
         "matcher": "Bash",
-        "hooks": [{ "type": "command", "if": "Bash(revefi-agent-analyzer *)", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/revefi-agent-analyzer\" hook", "timeout": 10 }]
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(revefi-agent-analyzer *)",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/lib/revefi-agent-analyzer.js", "hook"],
+            "timeout": 10
+          }
+        ]
       }
     ]
   }
