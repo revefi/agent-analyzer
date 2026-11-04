@@ -4,8 +4,8 @@ set -e
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 if ! command -v node >/dev/null 2>&1; then
   echo "revefi-agent-analyzer needs Node.js 22.12 or newer, and node isn't on your PATH." >&2
-  echo "Install Node from https://nodejs.org, or install the standalone binary instead:" >&2
-  echo "  curl -fsSL https://github.com/revefi/agent-analyzer/releases/latest/download/install.sh | sh" >&2
+  echo "Install Node from https://nodejs.org, or download the standalone binary from" >&2
+  echo "  https://github.com/revefi/agent-analyzer/releases/latest" >&2
   exit 127
 fi
 exec node "$here/../lib/revefi-agent-analyzer.js" "$@"
