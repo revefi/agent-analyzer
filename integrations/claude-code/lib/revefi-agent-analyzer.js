@@ -5685,7 +5685,7 @@ var init_main = __esm({
     init_auth();
     init_commands();
     init_preview();
-    VERSION = true ? "0.7.1" : "0.0.0-dev";
+    VERSION = true ? "0.7.2" : "0.0.0-dev";
     USAGE = `Usage: revefi-agent-analyzer <command> [options]
 
 Find repeated work and wasted spend in your Claude Code sessions.
